@@ -1,161 +1,6 @@
 # Herdr Extensions
 
 <details name="language" open>
-<summary><b>English</b></summary>
-
-Make agent work easier to follow: live plans, conversation diffs, project Spaces, permissions, and autonomous dispatch.
-
-### Installation
-
-Install **Herdr App, Python 3.10+**, and the agent CLIs you use. These panels follow local agent sessions.
-
-```sh
-git clone https://github.com/AkaCMD/cmd-herdr-extensions.git
-cd cmd-herdr-extensions
-
-# Preview first; this command changes nothing.
-python scripts/install.py agent-todos
-
-# Install the collector dependency with the Python Herdr uses.
-python -m pip install -r mods/agent-todos/requirements.txt
-python scripts/install.py agent-todos --apply
-```
-
-In **Settings → Look → Layout**, choose **agent-progress**, then select a local agent terminal. Run `/reload` in Pi to load its extension.
-
-Add other features as needed; follow their activation steps below.
-
-| Extension | Purpose | Activation |
-|---|---|---|
-| `agent-todos` | Live Todo & Plan | Install `psutil`, select layout |
-| `personal-dispatch` | Autonomous dispatch | Register the host plugin |
-| `session-changes` | Conversation files & diffs | Enable Session in the layout |
-| `space-project` | Project folder per Space | Install Session first, then enable folders |
-| `space-permissions` | Permissions for new sessions | Requires Space menu and launcher hook |
-
-The installer previews by default and stops on conflicting files. After reviewing them, use `--apply --replace` to back up and replace; backups go to `.local/backups/` in this checkout. Set `--herdr-home` / `HERDR_APP_HOME` or `--pi-home` for custom locations. Copying files does not select the layout or register the dispatch plugin.
-
-### 1. Todo / Plan — follow the selected agent
-
-Install `agent-todos` and its Python dependency, select the **agent-progress** layout, then select a local agent terminal. Ask the agent to maintain a plan as it works. **生成 Todo** requests a checklist; **自动** tries once for a conversation without tasks. Completed items can be collapsed, and the panel follows agent selection.
-
-Generating a checklist sends a message to the agent. A working agent is interrupted first, then asked to update its plan and resume the original task. Resolve any pending terminal prompt before generating. Auto mode skips existing tasks and collector errors.
-
-![Real agent conversation and Todo progress](docs/images/todo.png)
-
-### 2. Dispatch — delegate and verify
-
-Install `personal-dispatch`, then register it for the host you use:
-
-```sh
-python scripts/install.py personal-dispatch
-python scripts/install.py personal-dispatch --apply
-python plugins/herdr-personal-dispatch/install.py --host codex
-# For Claude:
-python plugins/herdr-personal-dispatch/install.py --host claude
-```
-
-Open a new agent session **inside Herdr**:
-
-```text
-$dispatch Use two DeepSeek workers: one writes the website FAQ, the other a page checker.
-Act as the Codex controller. Check the actual files and validation results before accepting.
-```
-
-Use `/herdr-personal-dispatch:dispatch` in Claude. Codex or Claude can control the run; Codex, Claude and DeepSeek can execute jobs in separate interactive tabs. The default concurrency is two. The controller handles dependencies, verification, acceptance, pause and resume. Requires live `hc` and the selected agent CLIs; DeepSeek additionally requires configured `dsh-tui --backend dsh`.
-
-The screenshot shows a Codex controller dispatching real DeepSeek jobs for `FAQ.md` and `check_page.py`.
-
-![Real Codex dispatch controller and two DeepSeek workers](docs/images/dispatch.png)
-
-See the [dispatch guide](plugins/herdr-personal-dispatch/README.md) and [command reference](plugins/herdr-personal-dispatch/skills/dispatch/references/runtime.md).
-
-### 3. Space permissions — defaults for new sessions
-
-Right-click a Space → **Agent permissions…**, choose a profile, enable **Apply to new sessions**, and save.
-
-| Profile | Behavior |
-|---|---|
-| Default | Follows the agent's own configuration |
-| Plan | Read-only |
-| Auto | Writable, no tool approval prompts |
-| Yolo | No sandbox, no approval prompts; extra confirmation on save |
-
-Turning the switch off keeps the selection as a note only. Existing sessions keep their permissions until restarted. Claude Code, Codex and DeepSeek Harness are adapted; Pi and OpenCode are not.
-
-Install the Space menu and launcher support:
-
-```sh
-python scripts/install.py session-changes --apply
-python scripts/install.py space-project --apply
-python scripts/enable_session_changes.py agent-progress --apply
-python scripts/enable_space_project.py agent-progress --apply
-python scripts/install.py space-permissions --apply
-python scripts/enable_permissions.py          # preview launcher changes first
-python scripts/enable_permissions.py --apply
-```
-
-On Windows, a compatible existing `data/codex-bridge/launch.py` is required; the complete launch bridge is not bundled. On Unix without that bridge, the script can wrap supported native launchers in `programs.json`. Installing the dialog alone does not apply a profile.
-
-![Real per-Space permission dialog](docs/images/permissions.png)
-
-### 4. Session — review conversation changes
-
-```sh
-python scripts/install.py session-changes --apply
-python scripts/install.py space-project --apply
-python scripts/enable_session_changes.py agent-progress --apply
-```
-
-Click **Session**, select a file, and use **放大对比 ↗** for a larger view. Text diffs and supported structured comparisons follow the selected conversation. Helper scripts are hidden by default and can be shown with the footer toggle.
-
-![Real conversation file list and diff](docs/images/session.png)
-
-### 5. Project folder — start new tabs in the right directory
-
-After installing Session and `space-project`, enable the Space layout:
-
-```sh
-python scripts/enable_space_project.py agent-progress
-python scripts/enable_space_project.py agent-progress --apply
-```
-
-Right-click a Space → **Project folder…**, choose an existing directory and save. New tabs and agents opened through the project menus start there; existing terminals keep their directory. The script adds the layout-specific `Ctrl+Shift+T` binding when free and preserves conflicting bindings. **Clear** restores following the focused terminal.
-
-![Real project folder dialog](docs/images/folder.png)
-
-### Validation & troubleshooting
-
-- **`No module named psutil`**: install the dependency into the Python interpreter Herdr actually runs.
-- **Files copied but the panel doesn't appear**: select the layout and apply the relevant activation script.
-- **Menu appears but permissions don't apply**: verify the launcher hook and start a new session.
-- **Layout patch rejects `main` and other shipped layouts**: use the bundled personal layout or clone a shipped one first.
-
-```sh
-herdr-app check agent-todos
-herdr-app check session-changes
-herdr-app status
-python -m unittest discover -s scripts -p test_install.py -v
-python -m unittest discover -s plugins/herdr-personal-dispatch/tests -v
-```
-
-A mod check validates initial loading, not every interactive state. Screenshots show the captured demo scenarios; parser tests do not establish full live coverage across agents, systems, formats or recovery cases.
-
-### Source
-
-| Path | Contents |
-|---|---|
-| [extensions.json](extensions.json) | Install manifest |
-| [mods/](mods/) | Native panels and menus |
-| [layouts/](layouts/) | Personal layout |
-| [pi/extensions/](pi/extensions/) | Pi integration |
-| [bridge/](bridge/) | Permission launcher module |
-| [plugins/](plugins/) | Dispatch plugin |
-| [scripts/](scripts/) | Install, activation and tests |
-
-</details>
-
-<details name="language">
 <summary><b>中文</b></summary>
 
 让代理工作看得见、跟得上：实时计划、会话改动、项目空间、空间权限与自主调度。
@@ -322,5 +167,160 @@ python -m unittest discover -s plugins/herdr-personal-dispatch/tests -v
 | [bridge/](bridge/) | 权限启动模块 |
 | [plugins/](plugins/) | 调度插件 |
 | [scripts/](scripts/) | 安装、布局启用与测试 |
+
+</details>
+
+<details name="language">
+<summary><b>English</b></summary>
+
+Make agent work easier to follow: live plans, conversation diffs, project Spaces, permissions, and autonomous dispatch.
+
+### Installation
+
+Install **Herdr App, Python 3.10+**, and the agent CLIs you use. These panels follow local agent sessions.
+
+```sh
+git clone https://github.com/AkaCMD/cmd-herdr-extensions.git
+cd cmd-herdr-extensions
+
+# Preview first; this command changes nothing.
+python scripts/install.py agent-todos
+
+# Install the collector dependency with the Python Herdr uses.
+python -m pip install -r mods/agent-todos/requirements.txt
+python scripts/install.py agent-todos --apply
+```
+
+In **Settings → Look → Layout**, choose **agent-progress**, then select a local agent terminal. Run `/reload` in Pi to load its extension.
+
+Add other features as needed; follow their activation steps below.
+
+| Extension | Purpose | Activation |
+|---|---|---|
+| `agent-todos` | Live Todo & Plan | Install `psutil`, select layout |
+| `personal-dispatch` | Autonomous dispatch | Register the host plugin |
+| `session-changes` | Conversation files & diffs | Enable Session in the layout |
+| `space-project` | Project folder per Space | Install Session first, then enable folders |
+| `space-permissions` | Permissions for new sessions | Requires Space menu and launcher hook |
+
+The installer previews by default and stops on conflicting files. After reviewing them, use `--apply --replace` to back up and replace; backups go to `.local/backups/` in this checkout. Set `--herdr-home` / `HERDR_APP_HOME` or `--pi-home` for custom locations. Copying files does not select the layout or register the dispatch plugin.
+
+### 1. Todo / Plan — follow the selected agent
+
+Install `agent-todos` and its Python dependency, select the **agent-progress** layout, then select a local agent terminal. Ask the agent to maintain a plan as it works. **生成 Todo** requests a checklist; **自动** tries once for a conversation without tasks. Completed items can be collapsed, and the panel follows agent selection.
+
+Generating a checklist sends a message to the agent. A working agent is interrupted first, then asked to update its plan and resume the original task. Resolve any pending terminal prompt before generating. Auto mode skips existing tasks and collector errors.
+
+![Real agent conversation and Todo progress](docs/images/todo.png)
+
+### 2. Dispatch — delegate and verify
+
+Install `personal-dispatch`, then register it for the host you use:
+
+```sh
+python scripts/install.py personal-dispatch
+python scripts/install.py personal-dispatch --apply
+python plugins/herdr-personal-dispatch/install.py --host codex
+# For Claude:
+python plugins/herdr-personal-dispatch/install.py --host claude
+```
+
+Open a new agent session **inside Herdr**:
+
+```text
+$dispatch Use two DeepSeek workers: one writes the website FAQ, the other a page checker.
+Act as the Codex controller. Check the actual files and validation results before accepting.
+```
+
+Use `/herdr-personal-dispatch:dispatch` in Claude. Codex or Claude can control the run; Codex, Claude and DeepSeek can execute jobs in separate interactive tabs. The default concurrency is two. The controller handles dependencies, verification, acceptance, pause and resume. Requires live `hc` and the selected agent CLIs; DeepSeek additionally requires configured `dsh-tui --backend dsh`.
+
+The screenshot shows a Codex controller dispatching real DeepSeek jobs for `FAQ.md` and `check_page.py`.
+
+![Real Codex dispatch controller and two DeepSeek workers](docs/images/dispatch.png)
+
+See the [dispatch guide](plugins/herdr-personal-dispatch/README.md) and [command reference](plugins/herdr-personal-dispatch/skills/dispatch/references/runtime.md).
+
+### 3. Space permissions — defaults for new sessions
+
+Right-click a Space → **Agent permissions…**, choose a profile, enable **Apply to new sessions**, and save.
+
+| Profile | Behavior |
+|---|---|
+| Default | Follows the agent's own configuration |
+| Plan | Read-only |
+| Auto | Writable, no tool approval prompts |
+| Yolo | No sandbox, no approval prompts; extra confirmation on save |
+
+Turning the switch off keeps the selection as a note only. Existing sessions keep their permissions until restarted. Claude Code, Codex and DeepSeek Harness are adapted; Pi and OpenCode are not.
+
+Install the Space menu and launcher support:
+
+```sh
+python scripts/install.py session-changes --apply
+python scripts/install.py space-project --apply
+python scripts/enable_session_changes.py agent-progress --apply
+python scripts/enable_space_project.py agent-progress --apply
+python scripts/install.py space-permissions --apply
+python scripts/enable_permissions.py          # preview launcher changes first
+python scripts/enable_permissions.py --apply
+```
+
+On Windows, a compatible existing `data/codex-bridge/launch.py` is required; the complete launch bridge is not bundled. On Unix without that bridge, the script can wrap supported native launchers in `programs.json`. Installing the dialog alone does not apply a profile.
+
+![Real per-Space permission dialog](docs/images/permissions.png)
+
+### 4. Session — review conversation changes
+
+```sh
+python scripts/install.py session-changes --apply
+python scripts/install.py space-project --apply
+python scripts/enable_session_changes.py agent-progress --apply
+```
+
+Click **Session**, select a file, and use **放大对比 ↗** for a larger view. Text diffs and supported structured comparisons follow the selected conversation. Helper scripts are hidden by default and can be shown with the footer toggle.
+
+![Real conversation file list and diff](docs/images/session.png)
+
+### 5. Project folder — start new tabs in the right directory
+
+After installing Session and `space-project`, enable the Space layout:
+
+```sh
+python scripts/enable_space_project.py agent-progress
+python scripts/enable_space_project.py agent-progress --apply
+```
+
+Right-click a Space → **Project folder…**, choose an existing directory and save. New tabs and agents opened through the project menus start there; existing terminals keep their directory. The script adds the layout-specific `Ctrl+Shift+T` binding when free and preserves conflicting bindings. **Clear** restores following the focused terminal.
+
+![Real project folder dialog](docs/images/folder.png)
+
+### Validation & troubleshooting
+
+- **`No module named psutil`**: install the dependency into the Python interpreter Herdr actually runs.
+- **Files copied but the panel doesn't appear**: select the layout and apply the relevant activation script.
+- **Menu appears but permissions don't apply**: verify the launcher hook and start a new session.
+- **Layout patch rejects `main` and other shipped layouts**: use the bundled personal layout or clone a shipped one first.
+
+```sh
+herdr-app check agent-todos
+herdr-app check session-changes
+herdr-app status
+python -m unittest discover -s scripts -p test_install.py -v
+python -m unittest discover -s plugins/herdr-personal-dispatch/tests -v
+```
+
+A mod check validates initial loading, not every interactive state. Screenshots show the captured demo scenarios; parser tests do not establish full live coverage across agents, systems, formats or recovery cases.
+
+### Source
+
+| Path | Contents |
+|---|---|
+| [extensions.json](extensions.json) | Install manifest |
+| [mods/](mods/) | Native panels and menus |
+| [layouts/](layouts/) | Personal layout |
+| [pi/extensions/](pi/extensions/) | Pi integration |
+| [bridge/](bridge/) | Permission launcher module |
+| [plugins/](plugins/) | Dispatch plugin |
+| [scripts/](scripts/) | Install, activation and tests |
 
 </details>
