@@ -1,8 +1,7 @@
 # Herdr Extensions
 
-[English](#english) · [中文](#中文)
-
-## English
+<details name="language" open>
+<summary><b>English</b></summary>
 
 Make agent work easier to follow: live plans, conversation diffs, project Spaces, permissions, and autonomous dispatch.
 
@@ -154,7 +153,10 @@ A mod check validates initial loading, not every interactive state. Screenshots 
 | [plugins/](plugins/) | Dispatch plugin |
 | [scripts/](scripts/) | Install, activation and tests |
 
-## 中文
+</details>
+
+<details name="language">
+<summary><b>中文</b></summary>
 
 让代理工作看得见、跟得上：实时计划、会话改动、项目空间、空间权限与自主调度。
 
@@ -320,3 +322,5 @@ python -m unittest discover -s plugins/herdr-personal-dispatch/tests -v
 | [bridge/](bridge/) | 权限启动模块 |
 | [plugins/](plugins/) | 调度插件 |
 | [scripts/](scripts/) | 安装、布局启用与测试 |
+
+</details>
