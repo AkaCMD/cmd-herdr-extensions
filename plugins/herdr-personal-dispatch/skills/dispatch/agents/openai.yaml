@@ -1,0 +1,6 @@
+interface:
+  display_name: "个人 Herdr 调度"
+  short_description: "在 Herdr 中自主拆任务、排队、监督和验收，支持普通目录、版本控制工作区、Codex 和 Claude。"
+  default_prompt: "使用 $dispatch 在 Herdr 中自主完成这些任务，沿用当前代理，减少人工介入。"
+policy:
+  allow_implicit_invocation: true

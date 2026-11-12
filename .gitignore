@@ -1,0 +1,22 @@
+# Runtime/generated files are local-only.
+.git/
+**/__pycache__/
+*.py[cod]
+**/vendor/
+**/node_modules/
+**/*.error
+**/gpui-kit.d.ts
+**/herdr.d.ts
+**/jsconfig.json
+.local/
+backups/
+data/
+layouts/.state/
+*.jsonl
+*.db*
+*.sqlite*
+.env
+.env.*
+*preview.png
+*shot*.png
+*.log

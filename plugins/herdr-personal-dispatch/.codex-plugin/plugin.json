@@ -1,0 +1,20 @@
+{
+  "name": "herdr-personal-dispatch",
+  "version": "0.1.4",
+  "description": "在 Herdr 中自主调度 Codex、Claude 和 DeepSeek，支持普通目录与版本控制。",
+  "author": {
+    "name": "AkaCMD"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "个人 Herdr 调度",
+    "shortDescription": "自主拆分、排队、续跑和验收；支持 Codex、Claude、DeepSeek 与版本控制。",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}

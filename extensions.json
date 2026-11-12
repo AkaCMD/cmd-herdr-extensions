@@ -1,0 +1,96 @@
+{
+  "personal-dispatch": {
+    "description": "Herdr 中自主调度 Codex / Claude，支持普通目录、依赖队列和左侧 Agent 展示",
+    "files": {
+      "plugin": [
+        "plugins/herdr-personal-dispatch/.codex-plugin/plugin.json",
+        "plugins/herdr-personal-dispatch/.claude-plugin/plugin.json",
+        "plugins/herdr-personal-dispatch/.claude-plugin/marketplace.json",
+        "plugins/herdr-personal-dispatch/skills/dispatch/SKILL.md",
+        "plugins/herdr-personal-dispatch/skills/dispatch/agents/openai.yaml",
+        "plugins/herdr-personal-dispatch/skills/dispatch/references/personal.md",
+        "plugins/herdr-personal-dispatch/skills/dispatch/references/runtime.md",
+        "plugins/herdr-personal-dispatch/skills/dispatch/scripts/dispatch.py",
+        "plugins/herdr-personal-dispatch/tests/test_dispatch.py",
+        "plugins/herdr-personal-dispatch/tests/live_smoke.py",
+        "plugins/herdr-personal-dispatch/install.py",
+        "plugins/herdr-personal-dispatch/README.md",
+        "plugins/herdr-personal-dispatch/LICENSE"
+      ]
+    }
+  },
+  "agent-todos": {
+    "description": "跟随选中代理的实时 todo / plan 面板",
+    "files": {
+      "herdr": [
+        "mods/agent-todos/main.js",
+        "mods/agent-todos/mod.json",
+        "mods/agent-todos/collector.py",
+        "mods/agent-todos/codex_plan.py",
+        "mods/agent-todos/test_collector.py",
+        "mods/agent-todos/test_generation.mjs",
+        "mods/agent-todos/requirements.txt",
+        "layouts/agent-progress.json",
+        "layouts/agent-progress.svg",
+        "mods/agent-todos/md_checklist_sync.py",
+        "mods/agent-todos/test_md_checklist_sync.py"
+      ],
+      "pi": ["pi/extensions/herdr-todos.ts"]
+    }
+  },
+  "space-permissions": {
+    "description": "单空间 agent 权限：空间右键菜单里设置 profile 和是否覆盖，新起的 agent session 按空间生效",
+    "files": {
+      "herdr": [
+        "mods/space-permissions/main.js",
+        "mods/space-permissions/mod.json",
+        "mods/menu-project/main.js",
+        "mods/menu-project/mod.json",
+        "mods/menu-project/shield.svg",
+        "mods/spaces-project/main.js",
+        "mods/spaces-project/mod.json",
+        "mods/space-folder/main.js",
+        "mods/space-folder/mod.json"
+      ],
+      "bridge": ["bridge/permissions.py"]
+    }
+  },
+  "session-changes": {
+    "description": "Session 面板：会话文件、UE 资产和结构化前后对比（含脚本快照桥接）",
+    "files": {
+      "herdr": [
+        "mods/session-changes/main.js",
+        "mods/session-changes/mod.json",
+        "mods/session-changes/session.svg",
+        "mods/session-changes/session_changes.py",
+        "mods/session-changes/deepseek_changes.py",
+        "mods/session-changes/test_deepseek_changes.py",
+        "mods/session-changes/test_session_changes.py",
+        "mods/session-changes/structured_changes.py",
+        "mods/session-changes/test_structured_changes.py",
+        "mods/tabs-session/main.js",
+        "mods/tabs-session/mod.json",
+        "mods/tabs-session/win-close.svg",
+        "mods/tabs-session/win-max.svg",
+        "mods/tabs-session/win-min.svg",
+        "mods/tabs-session/win-restore.svg"
+      ]
+    }
+  },
+  "space-project": {
+    "description": "Space 项目目录：为 Space 设置目录（类似 Codex 项目范围），其下新建的 tab / agent 都在此目录启动",
+    "files": {
+      "herdr": [
+        "mods/space-folder/main.js",
+        "mods/space-folder/mod.json",
+        "mods/spaces-project/main.js",
+        "mods/spaces-project/mod.json",
+        "mods/menu-project/main.js",
+        "mods/menu-project/mod.json",
+        "mods/new-menu-project/main.js",
+        "mods/new-menu-project/mod.json",
+        "mods/tabs-session/main.js"
+      ]
+    }
+  }
+}

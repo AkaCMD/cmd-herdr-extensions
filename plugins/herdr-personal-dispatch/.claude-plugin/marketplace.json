@@ -1,0 +1,10 @@
+{
+  "name": "AkaCMD-local",
+  "owner": {"name": "AkaCMD"},
+  "description": "AkaCMD 的本地工作插件",
+  "plugins": [{
+    "name": "herdr-personal-dispatch",
+    "description": "个人 Herdr 自主调度，支持 Codex、Claude、DeepSeek、普通目录与版本控制。",
+    "source": "./"
+  }]
+}
