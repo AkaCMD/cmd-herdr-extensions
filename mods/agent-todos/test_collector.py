@@ -107,7 +107,7 @@ class Adapters(unittest.TestCase):
             self.assertFalse((Path(d) / 'data').exists())
     def test_clean_title_drops_live_glyph_only(self):
         self.assertEqual(clean_title('⠂ 🐋 herdr右侧进度自动识别对话'), '🐋 herdr右侧进度自动识别对话')
-        self.assertEqual(clean_title('⠏ 优化关卡原型架构 | dev_workspace'), '优化关卡原型架构 | dev_workspace')
+        self.assertEqual(clean_title('⠏ 优化项目架构 | workspace'), '优化项目架构 | workspace')
         self.assertEqual(clean_title(None), '')
     def test_codex_title_selects_thread(self):
         with TemporaryDirectory() as d:
@@ -118,14 +118,14 @@ class Adapters(unittest.TestCase):
             con = sqlite3.connect(home / '.codex/state_5.sqlite')
             con.execute('create table threads (id text, name text, title text, rollout_path text, updated_at_ms integer)')
             con.execute('insert into threads values (?,?,?,?,?)', ('a', '旧会话', '', str(old), 1))
-            con.execute('insert into threads values (?,?,?,?,?)', ('b', '优化关卡原型架构', 'prompt', str(new), 2))
-            con.execute('insert into threads values (?,?,?,?,?)', ('c', '优化关卡原型架构', '', str(other), 3))
+            con.execute('insert into threads values (?,?,?,?,?)', ('b', '优化项目架构', 'prompt', str(new), 2))
+            con.execute('insert into threads values (?,?,?,?,?)', ('c', '优化项目架构', '', str(other), 3))
             con.commit(); con.close()
             with patch('collector.HOME', home):
                 # Same thread name in another terminal: the rollout this terminal holds open wins.
-                self.assertEqual(codex_thread('⠏ 优化关卡原型架构 | dev_workspace', [str(new)]), str(new))
-                self.assertEqual(codex_thread('⠏ 优化关卡原型架构 | dev_workspace'), str(other))
-                self.assertIsNone(codex_thread('⠏ 不存在的会话 | dev_workspace'))
+                self.assertEqual(codex_thread('⠏ 优化项目架构 | workspace', [str(new)]), str(new))
+                self.assertEqual(codex_thread('⠏ 优化项目架构 | workspace'), str(other))
+                self.assertIsNone(codex_thread('⠏ 不存在的会话 | workspace'))
                 self.assertIsNone(codex_thread(''))
     def test_dsh_todos_follow_open_session_title(self):
         with TemporaryDirectory() as d, TemporaryDirectory() as u:
@@ -188,5 +188,109 @@ class Adapters(unittest.TestCase):
                 result = opencode_collect([proc])
             self.assertEqual(result['tasks'], [])
             self.assertIn('OpenCode 会话', result['message'])
+
+class UserRevisions(unittest.TestCase):
+    def test_codex_request_changes_without_title_change_and_ignores_own_prompts(self):
+        state = {'tasks': [], 'calls': {}}
+        def user(text, stamp):
+            apply_record(state, {'type': 'event_msg', 'timestamp': stamp,
+                                'payload': {'type': 'user_message', 'message': text}}, 'codex')
+        user('first task', '1')
+        first = state['request']
+        apply_record(state, {'type': 'event_msg', 'payload': {'type': 'plan_update', 'plan': [{'step': 'first', 'status': 'completed'}]}}, 'codex')
+        self.assertEqual(state['taskRequest'], first)
+        user('[herdr-todo-request] generate', '2')
+        self.assertEqual(state['request'], first)
+        user('请根据当前对话中最近一项明确的工作生成 Todo 清单。 old plugin', '3')
+        self.assertEqual(state['request'], first)
+        user('changed task', '4')
+        self.assertNotEqual(state['request'], first)
+        self.assertEqual(state['taskRequest'], first)
+        before = state['request']
+        user('changed task', '5')
+        self.assertNotEqual(state['request'], before)
+
+    def test_current_codex_response_items_track_user_messages_without_event_messages(self):
+        state = {'tasks': [], 'calls': {}}
+        def user(mid, text):
+            apply_record(state, {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'id': mid,
+                                'content': [{'type': 'input_text', 'text': text}]}}, 'codex')
+        user('m1', 'task')
+        first = state['request']
+        user('env', '<environment_context>new date</environment_context>')
+        self.assertEqual(state['request'], first)
+        user('generated', '[herdr-todo-request] update')
+        self.assertEqual(state['request'], first)
+        user('m2', 'task')
+        self.assertNotEqual(state['request'], first)
+
+    def test_claude_tool_results_and_meta_messages_are_not_user_revisions(self):
+        state = {'tasks': [], 'calls': {}}
+        apply_record(state, {'uuid': 'u1', 'message': {'role': 'user', 'content': 'task'}}, 'claude')
+        first = state['request']
+        for event in [
+            {'isMeta': True, 'message': {'role': 'user', 'content': 'injected guidance'}},
+            {'message': {'role': 'user', 'content': [{'type': 'tool_result', 'content': 'result'}]}},
+        ]:
+            apply_record(state, event, 'claude')
+            self.assertEqual(state['request'], first)
+
+    def test_dsh_user_revisions_and_successful_todo_updates(self):
+        state = {'tasks': [], 'calls': {}}
+        apply_record(state, {'type': 'user/message', 'seq': 1, 'data': {'content': [{'type': 'text', 'text': 'task'}]}}, 'dsh')
+        request = state['request']
+        apply_record(state, {'type': 'tool/call', 'data': {'name': 'todo_write', 'callId': 'c'}}, 'dsh')
+        apply_record(state, {'type': 'tool/result', 'data': {'message': {'toolCallId': 'c', 'isError': False}}}, 'dsh')
+        self.assertEqual(state['taskRequest'], request)
+
+    def test_incremental_reads_do_not_replay_previous_messages_on_append(self):
+        with TemporaryDirectory() as d, patch('collector.DATA', Path(d) / 'cache'):
+            path = Path(d) / 'session.jsonl'
+            path.write_text(json.dumps({'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'task'}}) + '\n')
+            read_tasks(path, 'codex')
+            with path.open('a') as stream: stream.write('{}\n')
+            with patch('collector.apply_record', wraps=apply_record) as apply:
+                read_tasks(path, 'codex')
+                self.assertEqual(apply.call_count, 1)
+
+    def test_newer_codex_bridge_replaces_an_older_native_plan(self):
+        session = '00000000-0000-0000-0000-000000000001'
+        with TemporaryDirectory() as d, patch('collector.DATA', Path(d) / 'data/agent-todos'):
+            path = Path(d) / ('rollout-' + session + '.jsonl')
+            path.write_text(json.dumps({'type': 'event_msg', 'timestamp': '2020-01-01T00:00:00Z',
+                                       'payload': {'type': 'plan_update', 'plan': [{'step': 'old', 'status': 'completed'}]}}) + '\n')
+            write_plan({'plan': [{'step': 'new', 'status': 'pending'}], 'request': 'a' * 64}, d,
+                       {'HC_TERMINAL_ID': 't1', 'CODEX_THREAD_ID': session})
+            current = codex_tasks(path, 't1')
+            self.assertEqual(current['tasks'][0]['subject'], 'new')
+            self.assertEqual(current['taskRequest'], 'a' * 64)
+            with path.open('a') as stream:
+                stream.write(json.dumps({'type': 'event_msg', 'timestamp': '2099-01-01T00:00:00Z',
+                                         'payload': {'type': 'plan_update', 'plan': []}}) + '\n')
+            self.assertEqual(codex_tasks(path, 't1')['tasks'], [])
+
+class SnapshotEvents(unittest.TestCase):
+    def test_dsh_whole_table_events_replace_and_clear(self):
+        state = {'tasks': [], 'calls': {}}
+        apply_record(state, {'type': 'todo/write', 'data': {'todos': [{'content': 'old', 'status': 'completed'}]}}, 'dsh')
+        apply_record(state, {'type': 'todo/write', 'data': {'todos': [{'content': 'new', 'status': 'pending'}]}}, 'dsh')
+        self.assertEqual([t['subject'] for t in state['tasks']], ['new'])
+        apply_record(state, {'type': 'todo/write', 'data': {'todos': []}}, 'dsh')
+        self.assertTrue(state['plan_seen'])
+        self.assertEqual(state['tasks'], [])
+
+    def test_codex_plan_notification_replaces_snapshot(self):
+        state = {'tasks': [], 'calls': {}}
+        apply_record(state, {'method': 'turn/plan/updated', 'params': {'plan': [{'step': 'native', 'status': 'inProgress'}]}}, 'codex')
+        self.assertEqual(state['tasks'][0]['status'], 'in_progress')
+        apply_record(state, {'method': 'turn/plan/updated', 'params': {'plan': []}}, 'codex')
+        self.assertEqual(state['tasks'], [])
+
+    def test_claude_task_get_updates_one_task_after_success(self):
+        state = {'tasks': [{'id': '1', 'subject': 'existing', 'status': 'pending'}], 'calls': {}}
+        apply_record(state, {'message': {'content': [{'type': 'tool_use', 'id': 'g', 'name': 'TaskGet'}]}}, 'claude')
+        apply_record(state, {'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'g', 'content': json.dumps({'task': {'id': '1', 'subject': 'existing', 'status': 'completed'}})}]}}, 'claude')
+        self.assertEqual(len(state['tasks']), 1)
+        self.assertEqual(state['tasks'][0]['status'], 'completed')
 
 if __name__ == '__main__': unittest.main()

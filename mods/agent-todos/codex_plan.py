@@ -7,6 +7,7 @@ from the most recently modified rollout. No Codex logs are changed.
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import time
@@ -36,12 +37,15 @@ def write_plan(payload, app_home=None, environ=None):
     explanation = payload.get('explanation', '')
     if not isinstance(explanation, str):
         raise ValueError('Explanation must be a string.')
+    request = payload.get('request')
+    if request is not None and (not isinstance(request, str) or not re.fullmatch(r'[a-f0-9]{64}', request)):
+        raise ValueError('Request must be a SHA-256 user message identifier.')
     app = Path(app_home or env.get('HERDR_APP_HOME') or Path.home() / '.config/herdr-app')
     target = app / 'data/agent-todos/codex' / (session + '.json')
     target.parent.mkdir(parents=True, exist_ok=True)
     snapshot = {'sessionId': session, 'terminal': terminal, 'updatedAt': time.time(),
                 'plan': [{'step': x['step'], 'status': x['status']} for x in plan],
-                'explanation': explanation}
+                'explanation': explanation, 'request': request}
     temporary = target.with_suffix('.' + uuid.uuid4().hex + '.tmp')
     try:
         temporary.write_text(json.dumps(snapshot, ensure_ascii=False), encoding='utf-8')

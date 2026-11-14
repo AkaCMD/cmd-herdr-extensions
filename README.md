@@ -37,14 +37,14 @@ python scripts/install.py agent-todos --apply
 
 ### 1. Todo / Plan：跟随当前代理的任务清单
 
-选中代理终端，右侧 **Agent 进度** 面板展示当前会话的任务、进行中步骤和完成比例。支持 Claude Code、Codex、Pi 和 DeepSeek Harness 的本机会话；具体任务格式由各代理采集器适配。
+选中代理终端，右侧 **Agent 进度** 面板展示当前会话的任务、进行中步骤和完成比例。支持 Claude Code、Codex、Pi、DeepSeek Harness 和 OpenCode 的本机会话；具体任务格式由各代理采集器适配。
 
 1. 按上面的安装步骤启用 `agent-todos` 和布局。
-2. 在真实任务中让代理维护计划，例如：`为这个页面列出四步计划，完成一步就更新状态。`
-3. 没有清单时点 **生成 Todo**。开启 **自动** 后，切换到没有任务的会话时会尝试生成一次。
+2. 运行 `python mods/agent-todos/enable_instructions.py` 预览本机代理指导文件的修改，再加 `--apply` 写入有标记的入口。已存在的 Codex、Claude Code、Pi 和 OpenCode 配置目录会接入原生清单维护规则，旧文件会备份；新会话启动时加载规则。
+3. **自动同步** 默认开启，通过文件变更事件读取代理任务工具的最新快照，监听或读取失败时 10 秒后重试。代理在执行中更新清单，任务变更后修订步骤。
 4. 切换代理，面板自动跟随；完成项可以折叠，**刷新** 可立即重新读取。
 
-**生成 Todo 会向代理发送请求。** 工作中的代理会先被暂停，更新清单后继续原任务；等待你回复的代理需要先处理终端提示。自动模式会跳过已有任务或存在采集错误的会话。
+自动同步读取原生 Todo / Plan 数据。手动点击 **生成 Todo** 会向代理发送请求；工作中的代理会先暂停，更新清单后继续原任务。等待你回复的代理需先处理终端提示。Pi 桥接更新后需 `/reload`；DeepSeek 压缩日志需 Python 3.14 或 PATH 中的 `zstd`。
 
 ![真实 Codex 演示会话与实时 Todo 面板](docs/images/todo.png)
 
@@ -209,9 +209,9 @@ The installer previews by default and stops on conflicting files. After reviewin
 
 ### 1. Todo / Plan — follow the selected agent
 
-Install `agent-todos` and its Python dependency, select the **agent-progress** layout, then select a local agent terminal. Ask the agent to maintain a plan as it works. **生成 Todo** requests a checklist; **自动** tries once for a conversation without tasks. Completed items can be collapsed, and the panel follows agent selection.
+Install `agent-todos` and its Python dependency, select the **agent-progress** layout, then select a local agent terminal. Run `python mods/agent-todos/enable_instructions.py` to preview native instruction-file changes, then add `--apply` to install a managed pointer with backups. Existing Codex, Claude Code, Pi and OpenCode configuration directories receive the guidance. New sessions load it and maintain checklists through their native task tools. **自动同步** is enabled by default and reads native snapshots on file-change notifications, with a ten-second retry after watcher or read failures. Completed items can be collapsed, and the panel follows agent selection.
 
-Generating a checklist sends a message to the agent. A working agent is interrupted first, then asked to update its plan and resume the original task. Resolve any pending terminal prompt before generating. Auto mode skips existing tasks and collector errors.
+Automatic synchronization reads native Todo / Plan data. Clicking **生成 Todo** manually sends a request, interrupting a working agent before it updates its checklist and resumes the task. Resolve pending terminal prompts first. Run `/reload` after updating the Pi bridge. Compressed DeepSeek logs require Python 3.14 or `zstd` on PATH.
 
 ![Real agent conversation and Todo progress](docs/images/todo.png)
 

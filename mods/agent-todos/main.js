@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, focused, theme, exec, hc, appHome, layout, run, props, notify, nextCommand, shared, setShared } from "herdr";
+import { agents, focused, theme, exec, hc, appHome, layout, run, props, notify, nextCommand, shared, setShared, watchFolder } from "herdr";
 
 const labels = { pending: "待处理", in_progress: "进行中", completed: "已完成", blocked: "受阻" };
 const statusNames = { working: "工作中", blocked: "等待你回复", idle: "空闲", done: "本轮结束" };
@@ -8,7 +8,7 @@ const todoTools = new Map([
   ["dsh-tui", () => "用 todo_write 写入当前会话的任务清单。"],
   ["pi", () => "用 todo 工具查看并更新当前会话的任务清单。"],
   ["claude-code", () => `用 TodoWrite 或 TaskCreate/TaskUpdate 写入任务。没有这些工具时，用临时 Markdown 清单和 ${JSON.stringify(appHome() + "/mods/agent-todos/md_checklist_sync.py")}，以 --session 传入已确认的当前 Claude 会话 ID。无法确认会话 ID 就询问我。`],
-  ["codex", () => `用 update_plan 写入计划。没有该工具时，通过 stdin 把 JSON {"plan":[{"step":"步骤","status":"pending"}]} 传给 ${JSON.stringify(appHome() + "/mods/agent-todos/codex_plan.py")}，并传入 --app-home ${JSON.stringify(appHome())}。用当前会话的环境变量关联，不要猜测会话 ID。`],
+  ["codex", request => `用 update_plan 写入计划。没有该工具时，通过 stdin 把 JSON ${JSON.stringify({ plan: [{ step: "步骤", status: "pending" }], ...(request ? { request } : {}) })} 传给 ${JSON.stringify(appHome() + "/mods/agent-todos/codex_plan.py")}，并传入 --app-home ${JSON.stringify(appHome())}。后续状态更新沿用 request 标识。用当前会话的环境变量关联，不要猜测会话 ID。`],
   ["opencode", () => "用 todowrite 工具写入当前会话的任务清单。"],
 ]);
 // Some agents (e.g. OpenCode) don't report an OSC 7501 `app`; fall back to their program key.
@@ -25,9 +25,7 @@ export default class AgentTodos extends View {
   init(_props, cx) {
     this.data = {}; this.selected = {}; this.showDone = true; this.busy = false;
     this.sending = new Set();
-    this.auto = Boolean(shared("agent-todos.auto"));
-    this.generated = new Set();
-    cx.timer.every(2000, cx => this.refresh(cx));
+    this.watchers = new Set(); this.watchFiles = [];
     cx.spawn(async cx => {
       for (;;) {
         if (await nextCommand() === "generate") this.generate(cx);
@@ -49,35 +47,22 @@ export default class AgentTodos extends View {
     const a = this.target();
     if (this.generationUnavailable(a) || (address && address !== a.address)) return;
     const prompt = [
+      "[herdr-todo-request]",
       "请根据当前对话中最近一项明确的工作生成 Todo 清单。保留已有任务和完成状态，只补充缺少的步骤。",
-      todoTools.get(agentKind(a))(),
+      "任务描述或目标已经改变时，按最新用户要求重写清单，移除已不适用的步骤；仅保留仍适用的完成状态。执行每一步时及时更新进行中和完成状态。",
+      todoTools.get(agentKind(a))(this.data?.request),
       "这是 Todo 面板插入的临时请求，不取代原始用户任务。请立即执行生成或更新清单，不要停在计划或请求再次确认。",
       "清单写入后，立即继续本次被打断或尚未完成的原始用户消息，从已完成的进度接着做，沿用原有范围、授权和验证要求；不要重复已经完成的操作，不要因生成清单就结束本轮。",
       "如果原始任务已经完成，只更新清单并简短报告；没有明确任务时才询问我要规划什么，不要凭空生成。",
     ].join(" ");
     this.sendGeneration(cx, a, prompt);
   }
+  get auto() { return shared("agent-todos.auto") !== false; }
+  set auto(value) { setShared("agent-todos.auto", value); }
   toggleAuto(cx) {
     this.auto = !this.auto;
-    setShared("agent-todos.auto", this.auto);
     cx.notify();
-    if (this.auto) this.maybeAuto(cx);
-  }
-  // 自动模式：跟随的对话每会话自动生成一次 Todo，无需手动点击。等待回复或已在发送时跳过，
-  // 已有任务或需要手动处理（采集器报错/提示）时跳过，其余情况由下一次 2 秒同步重试。
-  maybeAuto(cx) {
-    if (!this.auto) return;
-    const a = this.target();
-    if (!a || a.address.includes("/") || !todoTools.has(agentKind(a))) return;
-    if (a.status === "blocked" || this.sending.has(a.address)) return;
-    const key = `${a.address}:${agentKind(a)}:${this.selected[a.address] || ""}`;
-    if (this.key !== key) return;
-    const d = this.data || {};
-    if (d.error || d.message || (d.tasks || []).length > 0) return;
-    const genKey = `${a.address}\u0000${d.session || ""}`;
-    if (this.generated.has(genKey)) return;
-    this.generated.add(genKey);
-    this.generate(cx, a.address);
+    if (this.auto) this.refresh(cx);
   }
   async generationCall(args) {
     const result = await hc([args[0], "--json", ...args.slice(1)]);
@@ -133,23 +118,68 @@ export default class AgentTodos extends View {
       }
     });
   }
+  async collect(a) {
+    const args = [appHome() + "/mods/agent-todos/collector.py", a.address, agentKind(a), this.selected[a.address] || "", a.title || ""];
+    const r = await exec(props()?.python || "python", args, { timeout: 15000 });
+    if (r.code !== 0) throw new Error(r.stderr || "采集器执行失败");
+    return JSON.parse(r.stdout);
+  }
+  startWatching(cx, files) {
+    this.watchFiles = files;
+    const directories = new Set(files.map(file => file.replace(/\\/g, "/").replace(/\/[^/]+$/, "")));
+    for (const directory of directories) {
+      if (this.watchers.has(directory)) continue;
+      this.watchers.add(directory);
+      cx.spawn(async cx => {
+        try {
+          for (;;) {
+            const changed = await watchFolder(directory);
+            this.watchError = null;
+            const activeFiles = this.watchFiles.map(file => file.replace(/\\/g, "/"));
+            if (!activeFiles.some(file => file.startsWith(directory + "/"))) break;
+            if (this.auto && changed.some(path => {
+              const normalized = path.replace(/\\/g, "/");
+              return normalized === directory || activeFiles.some(file => file === normalized || (file.endsWith("/*") && normalized.startsWith(file.slice(0, -1))));
+            })) {
+              this.refresh(cx);
+            }
+          }
+        } catch (error) {
+          this.watchError = String(error); cx.notify();
+          cx.timer.after(10000, cx => {
+            if (this.auto) { this.startWatching(cx, this.watchFiles); this.refresh(cx); }
+          });
+        } finally { this.watchers.delete(directory); }
+      });
+      // Re-read after installing a watcher to cover writes between the first read and subscription.
+      this.pendingRefresh = true;
+    }
+  }
   refresh(cx) {
-    const a = this.target(); if (!a || this.busy) return;
+    const a = this.target(); if (!a) return;
+    if (this.busy) { this.pendingRefresh = true; return; }
     const key = `${a.address}:${agentKind(a)}:${this.selected[a.address] || ""}`;
     this.busy = true;
     cx.spawn(async cx => {
       try {
-        const args = [appHome() + "/mods/agent-todos/collector.py", a.address, agentKind(a), this.selected[a.address] || "", a.title || ""];
-        const r = await exec(props()?.python || "python", args, { timeout: 15000 });
-        if (r.code !== 0) throw new Error(r.stderr || "采集器执行失败");
-        const value = JSON.parse(r.stdout); const packed = JSON.stringify(value);
+        const value = await this.collect(a); const packed = JSON.stringify(value);
+        const current = this.target();
+        if (!current || `${current.address}:${agentKind(current)}:${this.selected[current.address] || ""}` !== key || plainTitle(current.title) !== plainTitle(a.title)) return;
+        this.title = plainTitle(a.title); this.seq = a.seq;
+        this.startWatching(cx, value.watchFiles || []);
         if (this.key !== key || this.packed !== packed) {
           this.key = key; this.data = value; this.packed = packed; cx.notify();
         }
-        this.maybeAuto(cx);
       } catch (e) {
+        const current = this.target();
+        if (!current || `${current.address}:${agentKind(current)}:${this.selected[current.address] || ""}` !== key) return;
+        this.title = plainTitle(a.title); this.seq = a.seq;
         this.key = key; this.data = { error: String(e), tasks: [] }; this.packed = null; cx.notify();
-      } finally { this.busy = false; }
+        cx.timer.after(10000, cx => { if (this.auto) this.refresh(cx); });
+      } finally {
+        this.busy = false; cx.notify();
+        if (this.pendingRefresh) { this.pendingRefresh = false; this.refresh(cx); }
+      }
     });
   }
   button(id, text, action, t) {
@@ -160,7 +190,7 @@ export default class AgentTodos extends View {
     const key = a ? `${a.address}:${agentKind(a)}:${this.selected[a.address] || ""}` : null;
     const d = this.key === key ? this.data : {};
     const unavailable = this.generationUnavailable(a);
-    if (a && this.key !== key && !this.busy) this.refresh(cx);
+    if (a && (this.key !== key || (this.auto && (this.title !== plainTitle(a.title) || this.seq !== a.seq))) && !this.busy) this.refresh(cx);
     const tasks = d.tasks || []; const done = tasks.filter(x => x.status === "completed").length;
     const ongoing = tasks.filter(x => x.status === "in_progress");
     const row = task => {
@@ -180,9 +210,9 @@ export default class AgentTodos extends View {
           .child(div().id("todo-auto").px(7).py(4).rounded(5).text_size(11)
             .bg(this.auto ? t.accent : t.raised).text_color(this.auto ? t.accent_foreground : t.muted)
             .cursor_pointer().hover(s => s.bg(this.auto ? t.accent : t.hover))
-            .tooltip(this.auto ? "自动模式已开启：切换对话时自动生成 Todo（点击关闭）" : "自动模式：开启后切换对话时自动生成 Todo，无需手动点击")
+            .tooltip(this.auto ? "文件事件触发原生 Todo / Plan 同步（点击暂停）" : "开启原生 Todo / Plan 文件事件同步")
             .on_click((_e, cx) => this.toggleAuto(cx))
-            .child(this.auto ? "自动 ✓" : "自动"))
+            .child(this.auto ? "自动同步 ✓" : "自动同步"))
           .child(div().id("todo-generate").px(7).py(4).rounded(5).text_size(11).bg(t.raised)
             .text_color(unavailable ? t.dim : t.foreground).tooltip(unavailable || "立即生成 Todo；工作中的代理先暂停，生成后继续原任务")
             .when(!unavailable, el => el.cursor_pointer().hover(s => s.bg(t.hover)).on_click((_e, cx) => this.generate(cx, a.address)))
@@ -208,7 +238,7 @@ export default class AgentTodos extends View {
         .when(done > 0, el => el.child(this.button("todo-done", `${this.showDone ? "▾" : "▸"} 已完成 (${done})`, (_e, cx) => { this.showDone = !this.showDone; cx.notify(); }, t)))
         .when(this.showDone, el => el.children(tasks.filter(x => x.status === "completed").map(row))))
       .child(h_flex().px(10).py(7).flex_none().justify_between()
-        .child(div().text_size(10).text_color(t.dim).child("本机 · 2 秒同步"))
+        .child(div().text_size(10).text_color(t.dim).child(this.watchError ? "监听失败 · 10 秒后重试" : "本机 · 文件事件同步"))
         .child(this.button("todo-refresh", "刷新", (_e, cx) => this.refresh(cx), t)));
   }
 }

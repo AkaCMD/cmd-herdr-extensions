@@ -12,10 +12,13 @@ const ok = value => ({ code: 0, stdout: JSON.stringify(value), stderr: "" });
 function fixture(states = ["working", "idle"], overrides = {}) {
   const a = { address: "t-test", app: "codex", status: states[0] };
   const calls = [], notices = [], tasks = [], timers = [], sharedStore = {};
+  const watchWaiters = [];
   let reads = 0;
   const context = vm.createContext({
     View: class {}, agents: () => [a], focused: () => ({ terminal: a.address }),
     appHome: () => "/synthetic/herdr", notify: value => notices.push(value),
+    watchFolder: path => new Promise(resolve => watchWaiters.push({ path, resolve })),
+    nextCommand: () => new Promise(() => {}),
     shared: key => sharedStore[key],
     setShared: (key, value) => { sharedStore[key] = value; return null; },
     hc: async args => {
@@ -30,19 +33,9 @@ function fixture(states = ["working", "idle"], overrides = {}) {
   vm.runInContext(source, context);
   const mod = new context.AgentTodos();
   mod.sending = new Set();
+  mod.collect = async () => mod.data || {};
   const cx = { notify() {}, spawn(fn) { tasks.push(fn(cx)); }, timer: { after(_ms, fn) { timers.push(fn); } } };
-  return { a, mod, cx, calls, notices, tasks, timers, sharedStore, finish: () => Promise.all(tasks) };
-}
-
-// Auto mode state as init leaves it, with a ready, empty conversation.
-function autoFixture(states = ["idle"], data = { tasks: [], session: "s1" }) {
-  const f = fixture(states);
-  f.mod.auto = true;
-  f.mod.generated = new Set();
-  f.mod.selected = {};
-  f.mod.key = `${f.a.address}:${f.a.app}:`;
-  f.mod.data = data;
-  return f;
+  return { a, mod, cx, calls, notices, tasks, timers, sharedStore, watchWaiters, finish: () => Promise.all(tasks) };
 }
 
 test("working agent is interrupted immediately, generates Todo and resumes original work", async () => {
@@ -136,63 +129,6 @@ test("a rejected send is not blindly retried or announced as delivered", async (
   assert.ok(!f.notices.some(n => n.title === "已请求生成 Todo"));
 });
 
-test("auto mode generates once for an empty conversation, without a manual click", async () => {
-  const f = autoFixture();
-  f.mod.maybeAuto(f.cx);
-  f.mod.maybeAuto(f.cx);
-  await f.finish();
-  assert.equal(f.calls.filter(c => c[0] === "send").length, 1);
-  assert.equal(f.calls.filter(c => c[0] === "interrupt").length, 0);
-});
-
-test("auto mode leaves conversations that already have tasks alone", async () => {
-  const f = autoFixture(["idle"], { tasks: [{ id: 1, subject: "x", status: "pending" }], session: "s1" });
-  f.mod.maybeAuto(f.cx);
-  await f.finish();
-  assert.ok(!f.calls.some(c => ["get", "send"].includes(c[0])));
-});
-
-test("auto mode skips blocked agents without marking them, then retries", async () => {
-  const f = autoFixture(["idle"], { tasks: [], session: "s1" });
-  f.a.status = "blocked";
-  f.mod.maybeAuto(f.cx);
-  await f.finish();
-  assert.ok(!f.calls.some(c => ["get", "send"].includes(c[0])));
-  f.a.status = "idle";
-  f.mod.maybeAuto(f.cx);
-  await f.finish();
-  assert.equal(f.calls.filter(c => c[0] === "send").length, 1);
-});
-
-test("auto mode ignores unsupported agents and collector setup hints", async () => {
-  for (const data of [{ message: "需要 /reload" }, { error: "boom" }, { tasks: [], message: "多个会话" }]) {
-    const f = autoFixture(["idle"], { tasks: [], ...data });
-    f.mod.maybeAuto(f.cx);
-    await f.finish();
-    assert.ok(!f.calls.some(c => ["get", "send"].includes(c[0])));
-  }
-  const g = autoFixture(["idle"], { tasks: [], session: "s1" });
-  g.a.app = "nvim";
-  g.mod.maybeAuto(g.cx);
-  await g.finish();
-  assert.ok(!g.calls.some(c => ["get", "send"].includes(c[0])));
-});
-
-test("auto toggle flips and persists its state", () => {
-  const f = fixture(["blocked"]);
-  f.mod.auto = false;
-  f.mod.generated = new Set();
-  f.mod.selected = {};
-  f.mod.data = {};
-  f.mod.key = `${f.a.address}:${f.a.app}:`;
-  f.mod.toggleAuto(f.cx);
-  assert.equal(f.mod.auto, true);
-  assert.equal(f.sharedStore["agent-todos.auto"], true);
-  f.mod.toggleAuto(f.cx);
-  assert.equal(f.mod.auto, false);
-  assert.equal(f.sharedStore["agent-todos.auto"], false);
-});
-
 test("agents without an OSC app fall back to their program key (OpenCode)", async () => {
   const f = fixture(["idle"]);
   f.a.app = null;
@@ -203,22 +139,68 @@ test("agents without an OSC app fall back to their program key (OpenCode)", asyn
   assert.match(f.calls.at(-1).at(-1), /todowrite/);
 });
 
-test("auto mode generates once per session for an agent without an OSC app", async () => {
-  const f = fixture(["idle"]);
-  f.a.app = null;
-  f.a.program = { key: "opencode" };
-  f.mod.auto = true;
-  f.mod.generated = new Set();
+test("automatic synchronization refreshes snapshots without sending terminal input", async () => {
+  const f = fixture(["working"]);
   f.mod.selected = {};
-  f.mod.key = "t-test:opencode:";
-  f.mod.data = {};
-  f.mod.maybeAuto(f.cx);
+  f.mod.data = { session: "s1", tasks: [] };
+  f.mod.collect = async () => ({ session: "s1", request: "changed", tasks: [{ id: 1, subject: "new task", status: "in_progress" }] });
+  f.mod.refresh(f.cx);
   await f.finish();
-  assert.deepEqual(f.calls.map(c => c[0]), ["get", "send"]);
-  assert.match(f.calls.at(-1).at(-1), /todowrite/);
-  // A repeated sync in the same session never sends twice.
-  f.mod.sending.clear();
-  f.mod.maybeAuto(f.cx);
+  assert.equal(f.mod.data.tasks[0].subject, "new task");
+  assert.equal(f.calls.length, 0);
+  f.mod.refresh(f.cx);
   await f.finish();
-  assert.equal(f.calls.filter(c => c[0] === "send").length, 1);
+  assert.equal(f.calls.length, 0);
+});
+
+test("sync is enabled by default and the saved opt-out survives another view", () => {
+  const f = fixture();
+  assert.equal(f.mod.auto, true);
+  f.sharedStore["agent-todos.auto"] = false;
+  assert.equal(f.mod.auto, false);
+});
+
+test("stale asynchronous collector results are discarded after a session selection changes", async () => {
+  const f = fixture();
+  f.mod.selected = {};
+  f.mod.data = { session: "current" };
+  let complete;
+  f.mod.collect = () => new Promise(resolve => { complete = resolve; });
+  f.mod.refresh(f.cx);
+  f.mod.selected[f.a.address] = "new-choice";
+  complete({ tasks: [], session: "old" });
+  await f.finish();
+  assert.equal(f.mod.data.session, "current");
+  assert.equal(f.calls.length, 0);
+});
+
+const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+
+test("file events drive snapshot replacement while unrelated cache writes are ignored", async () => {
+  const f = fixture();
+  f.mod.selected = {}; f.mod.watchers = new Set(); f.mod.watchFiles = [];
+  let reads = 0;
+  f.mod.collect = async () => ({ session: "s1", watchFiles: ["/synthetic/native/session.jsonl"], tasks: [{ id: 1, subject: `snapshot-${++reads}`, status: "pending" }] });
+  f.mod.refresh(f.cx);
+  await settle();
+  assert.equal(reads, 2);
+  f.watchWaiters.shift().resolve(["/synthetic/native/cache.tmp"]);
+  await settle();
+  assert.equal(reads, 2);
+  f.watchWaiters.shift().resolve(["/synthetic/native/session.jsonl"]);
+  await settle();
+  assert.equal(reads, 3);
+  assert.equal(f.mod.data.tasks[0].subject, "snapshot-3");
+  assert.equal(f.calls.length, 0);
+  f.mod.watchFiles = [];
+  f.watchWaiters.shift().resolve(["/synthetic/native/session.jsonl"]);
+  await f.finish();
+});
+
+test("initialization uses event subscriptions without a periodic collection timer", async () => {
+  const f = fixture();
+  f.cx.timer.every = () => assert.fail("periodic polling must not be scheduled");
+  f.mod.init({}, f.cx);
+  await settle();
+  assert.equal(f.calls.length, 0);
 });

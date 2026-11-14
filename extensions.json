@@ -42,7 +42,10 @@
         "layouts/agent-progress.json",
         "layouts/agent-progress.svg",
         "mods/agent-todos/md_checklist_sync.py",
-        "mods/agent-todos/test_md_checklist_sync.py"
+        "mods/agent-todos/test_md_checklist_sync.py",
+        "mods/agent-todos/instructions.md",
+        "mods/agent-todos/enable_instructions.py",
+        "mods/agent-todos/test_instructions.py"
       ],
       "pi": [
         "pi/extensions/herdr-todos.ts"
