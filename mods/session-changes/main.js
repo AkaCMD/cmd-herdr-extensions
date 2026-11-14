@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, ScrollHandle } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { agents, focused, exec, hc, appHome, theme, settings, openOverlay, closeOverlay, props, nextCommand } from "herdr";
 
 // The agent this panel follows: the focused agent pane, else the last one followed in
@@ -25,7 +25,7 @@ export default class SessionChanges extends View {
     this.showScripts = false; this.info = _props.info ?? null;
     this.error = null; this.address = this.expanded ? this.pinnedAgent : null; this.signature = ""; this.handle = cx.focus_handle();
     this.panelWidth = 360; this.mode = "auto"; this.wrap = false; this.context = false;
-    this.scroll = ScrollHandle.new(); this.cursor = -1; this.confirmUndo = null;
+    this.scroll = VirtualListScrollHandle.new(); this.cursor = -1; this.confirmUndo = null;
     this.refresh(cx);
     // Unreal assets get saved without the transcript changing: rebuild fully every 20 s.
     this.polls = 0;
@@ -152,7 +152,7 @@ export default class SessionChanges extends View {
 
   compareRow(row, t) {
     if (row[0] !== "C") return this.diffRow(row, t);
-    return h_flex().h(this.rowHeight).flex_none().flex_none().w_full().text_size(this.expanded ? 14 : 11)
+    return h_flex().h(this.rowHeight).flex_none().w_full().text_size(this.expanded ? 14 : 11)
       .child(div().w(this.locationWidth).flex_none().px(8).truncate().text_color(t.muted).tooltip(row[1]).child(row[1]))
       .child(div().w(this.valueWidth).flex_none().px(8).h_full().bg(t.ansi1 + "12").text_color(row[2] === "∅" ? t.dim : t.ansi1).truncate().tooltip(row[2]).child(row[2]))
       .child(div().flex_1().min_w(this.valueWidth).px(8).h_full().bg(t.ansi2 + "12").text_color(row[3] === "∅" ? t.dim : t.ansi2).truncate().tooltip(row[3]).child(row[3]));
@@ -249,20 +249,28 @@ export default class SessionChanges extends View {
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(this.expanded ? 14 : 11)
         .child(div().id("session-changes-diff-x").size_full().overflow_x_scrollbar()
           .child(div().w_full().min_w(width).h_full()
-            .child(v_flex().id("session-changes-diff").overflow_y_scroll().children(stream.map((item) => {
+            .child(v_virtual_list("session-changes-diff", stream.length, this.rowHeight,
+              (i) => `${stream[i].file.path}:${i}:${this.signature}:${this.mode}:${this.wrap}:${this.context}`,
+              (range) => stream.slice(range.start, range.end).map((item) => {
                 const entry = item.file, row = item.row;
                 if (row[0] === "F") return h_flex().h(this.rowHeight).flex_none().gap(8).px(8).bg(t.raised)
                   .child(div().flex_1().truncate().child(entry.rel))
-                  .when(Boolean(entry.review), (e) => e.child(this.button(`undo-${entry.path}`, this.confirmUndo === `${entry.path}:file` ? "确认撤销文件" : "撤销文件", (_e, cx) => this.undo(entry, null, cx), t)))
+                  .when(Boolean(entry.review), (e) => e.child(div().px(7).text_color(t.accent).child(this.confirmUndo === `${entry.path}:file` ? "再次点击标题确认撤销" : "点击标题撤销文件")))
                   .when(!entry.review, (e) => e.child(div().text_size(10).text_color(t.dim).tooltip("缺少可验证的文本基线，或属于结构化/二进制对比").child("撤销不可用")));
                 if (row[0] === "@") return h_flex().h(this.rowHeight).flex_none()
                   .child(this.diffRow(row, t).flex_1().min_w(0))
-                  .when(Boolean(entry.review && !this.context), (e) => e.child(this.button(`undo-block-${entry.path}-${item.block}`, this.confirmUndo === `${entry.path}:${item.block}` ? "确认撤销" : "撤销块", (_e, cx) => this.undo(entry, item.block, cx), t)));
-                if (row[0] === "S") return h_flex().w_full().h(this.rowHeight)
+                  .when(Boolean(entry.review && !this.context), (e) => e.child(div().px(7).text_color(t.accent).child(this.confirmUndo === `${entry.path}:${item.block}` ? "再次点击确认" : "点击撤销块")));
+                if (row[0] === "S") return h_flex().w_full().h(this.rowHeight).flex_none()
                   .child(div().w(width / 2).flex_none().overflow_hidden().child(this.diffRow(item.left || ["", null, ""], t)))
                   .child(div().flex_1().min_w(0).overflow_hidden().child(this.diffRow(item.right || ["", null, ""], t)));
                 return this.compareRow(row, t);
-              })).track_scroll(this.scroll).size_full())))
+              })).on_item_click((key, cx) => {
+                const index = stream.findIndex((item, i) => `${item.file.path}:${i}:${this.signature}:${this.mode}:${this.wrap}:${this.context}` === key);
+                const item = stream[index];
+                if (!item?.file.review) return;
+                if (item.row[0] === "F") this.undo(item.file, null, cx);
+                if (item.row[0] === "@" && !this.context) this.undo(item.file, item.block, cx);
+              }).track_scroll(this.scroll).size_full())))
         .child(Scrollbar.vertical("session-changes-diff").viewport_from_layout().absolute().inset_0())
         .when(!file && shown.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Select a file to view its changes"))))
       .child(h_flex().flex_none().h(34).px(12).gap(8).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)

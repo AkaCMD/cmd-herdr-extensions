@@ -91,7 +91,8 @@
         "mods/tabs-session/win-min.svg",
         "mods/tabs-session/win-restore.svg",
         "mods/session-changes/review_changes.py",
-        "mods/session-changes/test_review_changes.py"
+        "mods/session-changes/test_review_changes.py",
+        "mods/session-changes/test_render.mjs"
       ]
     }
   },
