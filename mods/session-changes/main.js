@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, ScrollHandle } from "gpui-base";
 import { agents, focused, exec, hc, appHome, theme, settings, openOverlay, closeOverlay, props, nextCommand } from "herdr";
 
 // The agent this panel follows: the focused agent pane, else the last one followed in
@@ -24,7 +24,8 @@ export default class SessionChanges extends View {
     this.files = _props.fileData ? [_props.fileData] : []; this.open = _props.file ?? null;
     this.showScripts = false; this.info = _props.info ?? null;
     this.error = null; this.address = this.expanded ? this.pinnedAgent : null; this.signature = ""; this.handle = cx.focus_handle();
-    this.panelWidth = 360;
+    this.panelWidth = 360; this.mode = "auto"; this.wrap = false; this.context = false;
+    this.scroll = ScrollHandle.new(); this.cursor = -1; this.confirmUndo = null;
     this.refresh(cx);
     // Unreal assets get saved without the transcript changing: rebuild fully every 20 s.
     this.polls = 0;
@@ -97,22 +98,61 @@ export default class SessionChanges extends View {
   visible() { return this.showScripts ? this.files : this.files.filter((f) => !f.script); }
 
   pick(path, cx) {
-    this.open = this.open === path ? null : path;
-    this.closed = !this.open;
+    this.open = path;
+    const index = this.stream?.findIndex((r) => r.file.path === path) ?? -1;
+    if (index >= 0) this.scroll.scroll_to_item(index);
+    this.closed = false;
     cx.notify();
   }
 
+  button(id, label, action, t) {
+    return div().id(id).px(7).h(24).flex().items_center().rounded(4).bg(t.raised)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).on_click(action).child(label);
+  }
+
+  navigate(delta, cx) {
+    const points = this.stream.map((r, i) => r.row[0] === "@" ? i : -1).filter((i) => i >= 0);
+    if (!points.length) return;
+    this.cursor = (this.cursor + delta + points.length) % points.length;
+    const index = points[this.cursor];
+    this.open = this.stream[index].file.path;
+    this.scroll.scroll_to_item(index); cx.notify();
+  }
+
+  undo(file, block, cx) {
+    if (this.undoing) return;
+    const key = `${file.path}:${block ?? "file"}`;
+    if (this.confirmUndo !== key) { this.confirmUndo = key; cx.notify(); return; }
+    this.confirmUndo = null; this.undoing = true;
+    cx.spawn(async (cx) => {
+      try {
+        const result = await exec("python", [`${appHome()}/mods/session-changes/review_changes.py`,
+          JSON.stringify({ review: file.review, block })], { timeout: 30000 });
+        const out = JSON.parse(result.stdout);
+        if (result.code !== 0 || out.error) throw new Error(out.error || result.stderr);
+        this.error = null; this.signature = "";
+      } catch (error) { this.error = String(error); }
+      finally { this.undoing = false; this.refresh(cx); cx.notify(); }
+    });
+  }
+
+  code(text, t) {
+    const tokens = (text || " ").split(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\b(?:const|let|var|function|return|if|else|class|import|from|def|for|while|true|false|None|null|async|await|export|public|private|void|int|new)\b|\b\d+(?:\.\d+)?\b|\/\/.*$|#.*$)/g);
+    return h_flex().flex_1().min_w(0).children(tokens.filter(Boolean).map((token) =>
+      div().flex_none().whitespace_nowrap().text_color(/^["']/.test(token) ? t.ansi2 : /^(\/\/|#)/.test(token) ? t.dim : /^(\d|const$|let$|var$|function$|return$|if$|else$|class$|import$|from$|def$|for$|while$|true$|false$|None$|null$|async$|await$|export$|public$|private$|void$|int$|new$)/.test(token) ? t.ansi4 : t.foreground).child(token)));
+  }
+
   diffRow([kind, number, text], t) {
-    if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    return h_flex().w_full().h(this.expanded ? 28 : 20).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
+    if (kind === "@") return div().w_full().px(12).h(this.rowHeight).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
+    return h_flex().w_full().h(this.rowHeight).flex_none().gap(6).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
       .child(div().w(34).flex_none().text_right().text_color(t.dim).child(number == null ? "" : String(number)))
       .child(div().w(10).flex_none().text_color(kind === "+" ? t.ansi2 : kind === "-" ? t.ansi1 : t.dim).child(kind === " " ? "" : kind))
-      .child(div().flex_1().min_w(0).truncate().text_color(kind === "" ? t.dim : t.foreground).child(text || " "));
+      .child(this.code(text, t));
   }
 
   compareRow(row, t) {
     if (row[0] !== "C") return this.diffRow(row, t);
-    return h_flex().h(this.expanded ? 30 : 24).flex_none().w_full().text_size(this.expanded ? 14 : 11)
+    return h_flex().h(this.rowHeight).flex_none().flex_none().w_full().text_size(this.expanded ? 14 : 11)
       .child(div().w(this.locationWidth).flex_none().px(8).truncate().text_color(t.muted).tooltip(row[1]).child(row[1]))
       .child(div().w(this.valueWidth).flex_none().px(8).h_full().bg(t.ansi1 + "12").text_color(row[2] === "∅" ? t.dim : t.ansi1).truncate().tooltip(row[2]).child(row[2]))
       .child(div().flex_1().min_w(this.valueWidth).px(8).h_full().bg(t.ansi2 + "12").text_color(row[3] === "∅" ? t.dim : t.ansi2).truncate().tooltip(row[3]).child(row[3]));
@@ -123,20 +163,59 @@ export default class SessionChanges extends View {
     const t = theme(), shown = this.expanded ? this.files.filter((f) => f.path === this.open) : this.visible(), hidden = this.expanded ? 0 : this.files.length - this.files.filter((f) => !f.script).length;
     const add = shown.reduce((n, f) => n + f.add, 0), del = shown.reduce((n, f) => n + f.del, 0);
     const file = this.files.find((f) => f.path === this.open);
-    const rows = file ? (file.cut ? [...file.rows, ["", null, `… showing the first ${file.rows.length} lines`]] : file.rows) : [];
-    const structured = rows.some((r) => r[0] === "C");
-    const width = structured ? Math.max(330, this.panelWidth - 2) : Math.max(300, ...rows.slice(0, 400).map((r) => (r[2]?.length ?? 0) * 7 + 70));
-    this.locationWidth = this.expanded ? Math.min(360, Math.round(width * 0.32)) : Math.round(width * 0.42);
-    this.valueWidth = Math.floor((width - this.locationWidth) / 2);
+    const split = this.mode === "split" || (this.mode === "auto" && this.panelWidth >= 900);
+    this.rowHeight = this.expanded ? 30 : 24;
+    const stream = [];
+    for (const entry of shown) {
+      stream.push({ file: entry, row: ["F", null, entry.rel] });
+      const source = this.context && entry.full_rows ? entry.full_rows : entry.rows;
+      let block = -1;
+      const paired = [];
+      for (let i = 0; i < source.length; i++) {
+        const row = source[i];
+        if (row[0] === "@") block++;
+        if (split && row[0] === "-") {
+          const removed = [], added = [];
+          while (i < source.length && source[i][0] === "-") removed.push(source[i++]);
+          while (i < source.length && source[i][0] === "+") added.push(source[i++]);
+          i--;
+          for (let j = 0; j < Math.max(removed.length, added.length); j++) paired.push({ row: ["S"], left: removed[j], right: added[j], block });
+        } else if (split && ["+", " "].includes(row[0])) {
+          paired.push({ row: ["S"], left: row[0] === " " ? row : null, right: row, block });
+        } else paired.push({ row, block });
+      }
+      const columns = Math.max(12, Math.floor((this.panelWidth / (split ? 2 : 1) - 75) / (this.expanded ? 8.4 : 6.6)));
+      for (const item of paired) {
+        const texts = item.row[0] === "S" ? [item.left?.[2] || "", item.right?.[2] || ""] : [item.row[2] || ""];
+        const count = this.wrap && !["@", "C"].includes(item.row[0]) ? Math.max(1, ...texts.map((text) => Math.ceil(text.length / columns))) : 1;
+        for (let part = 0; part < count; part++) {
+          const slice = (row) => row && [row[0], part ? null : row[1], this.wrap ? row[2].slice(part * columns, (part + 1) * columns) : row[2]];
+          stream.push({ ...item, file: entry, row: item.row[0] === "S" ? item.row : slice(item.row), left: slice(item.left), right: slice(item.right) });
+        }
+      }
+      if (entry.cut) stream.push({ file: entry, row: ["", null, "… truncated transcript diff"] });
+    }
+    this.stream = stream;
+    const width = this.wrap ? Math.max(280, this.panelWidth - 4) : Math.max(this.panelWidth - 4, ...stream.map((r) => (Math.max(r.row[2]?.length || 0, r.left?.[2]?.length || 0, r.right?.[2]?.length || 0) * 8 + 90) * (split ? 2 : 1)));
+    this.locationWidth = Math.round(Math.max(330, this.panelWidth) * 0.35);
+    this.valueWidth = Math.max(120, Math.floor((this.panelWidth - this.locationWidth) / 2));
     const empty = this.error || (!this.address ? "No agent in this tab" : this.loading && !this.info ? "Reading conversation…" : this.info ? (hidden ? "Only tool scripts changed in this conversation" : "No files changed in this conversation yet") : "Reading conversation…");
 
     return v_flex().id("session-changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
+      .on_key_down((event, cx) => { if (event.key === "f7") this.navigate(event.modifiers.shift ? -1 : 1, cx); })
       .on_size_change((size, cx) => { if (Math.abs(size.width - this.panelWidth) > 1) { this.panelWidth = size.width; cx.notify(); } })
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child(this.expanded ? "文件对比" : "Session"))
         .when(!this.expanded, (e) => e.child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${shown.length} files`)))
         .when(this.expanded, (e) => e.child(div().flex_1().min_w(0).truncate().tooltip(file?.source_path || file?.path || "").child(file?.rel || "Reading…")))
         .child(div().flex_1()).child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
+      .child(h_flex().flex_none().h(32).px(6).gap(4).text_size(11)
+        .child(this.button("review-mode", this.mode === "auto" ? "自动布局" : this.mode === "split" ? "左右并排" : "统一对比", (_e, cx) => { this.mode = { auto: "split", split: "unified", unified: "auto" }[this.mode]; cx.notify(); }, t))
+        .child(this.button("review-prev", "↑", (_e, cx) => this.navigate(-1, cx), t).tooltip("上一处改动 · Shift+F7"))
+        .child(this.button("review-next", "↓", (_e, cx) => this.navigate(1, cx), t).tooltip("下一处改动 · F7"))
+        .child(this.button("review-wrap", this.wrap ? "换行 ✓" : "换行", (_e, cx) => { this.wrap = !this.wrap; cx.notify(); }, t))
+        .child(this.button("review-context", this.context ? "完整上下文 ✓" : "上下文", (_e, cx) => { this.context = !this.context; cx.notify(); }, t)))
+      .when(Boolean(this.error && this.info), (e) => e.child(div().px(8).text_color(t.ansi1).child(this.error)))
       .child(h_flex().h(this.expanded ? 32 : 28).flex_none().px(10).justify_end()
         .child(div().id("session-expand").px(8).h(24).flex().items_center().rounded(5).text_size(12)
           .bg(t.raised).cursor_pointer().hover((s) => s.bg(t.hover))
@@ -167,16 +246,23 @@ export default class SessionChanges extends View {
         })).when(!shown.length, (e) => e.child(div().p(8).text_color(t.dim).child(empty))))
         .child(Scrollbar.vertical("session-changes-list").absolute().inset_0())))
       .when(Boolean(file?.label), (e) => e.child(div().flex_none().h(26).px(12).text_size(11).text_color(t.muted).truncate().tooltip(file.label).child(file.label)))
-      .child(v_flex().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(this.expanded ? 14 : 11)
+      .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(this.expanded ? 14 : 11)
         .child(div().id("session-changes-diff-x").size_full().overflow_x_scrollbar()
-          .child(v_flex().w_full().min_w(width).h_full()
-            .when(structured, (e) => e.child(h_flex().h(26).flex_none().bg(t.raised).text_color(t.muted)
-              .child(div().w(this.locationWidth).flex_none().px(8)
-                .child(file?.kind === "JSONL" ? "Line / field" : ["JSON", "TOML"].includes(file?.kind) ? "Field path" : "Sheet / cell"))
-              .child(div().w(this.valueWidth).flex_none().px(8).child("Before"))
-              .child(div().flex_1().px(8).child("After"))))
-            .child(v_virtual_list("session-changes-diff", rows.length, this.expanded ? (structured ? 30 : 28) : (structured ? 24 : 20), (i) => `${this.open}:${i}`,
-              (range) => rows.slice(range.start, range.end).map((row) => this.compareRow(row, t))).w_full().flex_1().min_h(0))))
+          .child(div().w_full().min_w(width).h_full()
+            .child(v_flex().id("session-changes-diff").overflow_y_scroll().children(stream.map((item) => {
+                const entry = item.file, row = item.row;
+                if (row[0] === "F") return h_flex().h(this.rowHeight).flex_none().gap(8).px(8).bg(t.raised)
+                  .child(div().flex_1().truncate().child(entry.rel))
+                  .when(Boolean(entry.review), (e) => e.child(this.button(`undo-${entry.path}`, this.confirmUndo === `${entry.path}:file` ? "确认撤销文件" : "撤销文件", (_e, cx) => this.undo(entry, null, cx), t)))
+                  .when(!entry.review, (e) => e.child(div().text_size(10).text_color(t.dim).tooltip("缺少可验证的文本基线，或属于结构化/二进制对比").child("撤销不可用")));
+                if (row[0] === "@") return h_flex().h(this.rowHeight).flex_none()
+                  .child(this.diffRow(row, t).flex_1().min_w(0))
+                  .when(Boolean(entry.review && !this.context), (e) => e.child(this.button(`undo-block-${entry.path}-${item.block}`, this.confirmUndo === `${entry.path}:${item.block}` ? "确认撤销" : "撤销块", (_e, cx) => this.undo(entry, item.block, cx), t)));
+                if (row[0] === "S") return h_flex().w_full().h(this.rowHeight)
+                  .child(div().w(width / 2).flex_none().overflow_hidden().child(this.diffRow(item.left || ["", null, ""], t)))
+                  .child(div().flex_1().min_w(0).overflow_hidden().child(this.diffRow(item.right || ["", null, ""], t)));
+                return this.compareRow(row, t);
+              })).track_scroll(this.scroll).size_full())))
         .child(Scrollbar.vertical("session-changes-diff").viewport_from_layout().absolute().inset_0())
         .when(!file && shown.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Select a file to view its changes"))))
       .child(h_flex().flex_none().h(34).px(12).gap(8).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)

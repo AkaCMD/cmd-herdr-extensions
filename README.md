@@ -124,6 +124,8 @@ python scripts/enable_session_changes.py agent-progress --apply
 
 ![真实会话中的文件列表与改动对比](docs/images/session.png)
 
+支持统一、左右并排和自动布局，多文件连续浏览，F7 / Shift+F7 跳转改动，基础关键词着色、行号、换行与完整上下文。可验证的普通 UTF-8 文本支持按文件和改动块撤销，点击两次确认，操作前校验内容并在 Herdr 数据目录保存备份。结构化、二进制和缺少基线的记录会标记撤销不可用。测试覆盖合成文件撤销和冲突，界面验证使用合成改动，真实代理端到端交互仍待验证。
+
 源码：[Session 面板与采集器](mods/session-changes/)
 
 ### 5. 空间目录：新 tab 从项目目录开始
@@ -282,6 +284,8 @@ python scripts/enable_session_changes.py agent-progress --apply
 ```
 
 Click **Session**, select a file, and use **放大对比 ↗** for a larger view. Text diffs and supported structured comparisons follow the selected conversation. Helper scripts are hidden by default and can be shown with the footer toggle.
+
+Unified, split and automatic layouts support a continuous file stream, F7 / Shift+F7 change navigation, basic keyword colors, line numbers, wrapping and full context. Verified ordinary UTF-8 text supports file and hunk undo with a second click to confirm, a content check and a backup in the Herdr data directory. Structured, binary and unverifiable records show undo as unavailable. Rollback and conflict tests use synthetic files. UI rendering uses synthetic changes, with live agent end-to-end interaction still unverified.
 
 ![Real conversation file list and diff](docs/images/session.png)
 

@@ -900,6 +900,12 @@ def main():
     registered = load_records(found['session'], root)
     tracked = {norm(f['source_path']) for f in registered if f['scope'] == 'workspace'}
     files = [f for f in build(ch, root) if norm(f['path']) not in tracked]
+    from review_changes import review
+    for file in files:
+        try:
+            review(file, ch.files.get(norm(file['path'])), found['session'])
+        except (OSError, ValueError, UnicodeError):
+            pass
     files += registered
     if kind != 'deepseek':
         files += ue_assets(found['transcripts'], root, ch)
