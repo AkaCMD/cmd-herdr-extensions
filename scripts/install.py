@@ -79,7 +79,8 @@ def main():
     elif args.extension == 'personal-dispatch':
         plugin = (args.herdr_home / 'plugins/herdr-personal-dispatch/install.py').resolve()
         print(f'Register with Codex and Claude: python "{plugin}" (or --host codex / --host claude).')
-        print('Then open a new agent session in Herdr App. This skill plugin has no JavaScript mod to check.')
+        print('Optional Escape pause hook: python "' + str(args.herdr_home / 'mods/dispatch-control/enable.py') + '" <personal-layout> --apply')
+        print('Run herdr-app check on mods/dispatch-control, then verify stop/resume in the window.')
     print('Layout selection, keys, credentials and session data were not changed.')
     return 0
 

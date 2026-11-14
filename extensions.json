@@ -15,7 +15,16 @@
         "plugins/herdr-personal-dispatch/tests/live_smoke.py",
         "plugins/herdr-personal-dispatch/install.py",
         "plugins/herdr-personal-dispatch/README.md",
-        "plugins/herdr-personal-dispatch/LICENSE"
+        "plugins/herdr-personal-dispatch/LICENSE",
+        "plugins/herdr-personal-dispatch/tests/test_enable_controls.py",
+        "plugins/herdr-personal-dispatch/tests/test_controls.mjs",
+        "plugins/herdr-personal-dispatch/tests/pause_smoke.py",
+        "plugins/herdr-personal-dispatch/tests/controls_smoke.py"
+      ],
+      "herdr": [
+        "mods/dispatch-control/main.js",
+        "mods/dispatch-control/mod.json",
+        "mods/dispatch-control/enable.py"
       ]
     }
   },
@@ -35,7 +44,9 @@
         "mods/agent-todos/md_checklist_sync.py",
         "mods/agent-todos/test_md_checklist_sync.py"
       ],
-      "pi": ["pi/extensions/herdr-todos.ts"]
+      "pi": [
+        "pi/extensions/herdr-todos.ts"
+      ]
     }
   },
   "space-permissions": {
@@ -52,7 +63,9 @@
         "mods/space-folder/main.js",
         "mods/space-folder/mod.json"
       ],
-      "bridge": ["bridge/permissions.py"]
+      "bridge": [
+        "bridge/permissions.py"
+      ]
     }
   },
   "session-changes": {

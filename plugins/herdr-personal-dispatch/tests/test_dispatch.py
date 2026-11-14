@@ -30,6 +30,11 @@ class FakeHerdr:
                     self.get(args[1])["labels"][k] = v
         elif args[0] == "interrupt":
             self.get(args[1])["status"] = {"state": "idle"}
+            return {"outcome": "stopped"}
+        elif args[0] == "kill":
+            self.get(args[1])["state"] = "finished"
+        elif args[0] == "keys":
+            self.get(args[1])["last_keys"] = [a for a in args[2:] if a != "--json"]
         elif args[0] == "ls":
             return {"terminals": list(self.terminals.values())}
         return {}
@@ -95,6 +100,29 @@ class DeliveryTests(unittest.TestCase):
                 return calls, receipt
             except d.DispatchError as exc:
                 return calls, str(exc)
+
+    def test_pause_during_native_send_never_resubmits_enter(self):
+        hc = d.Herdr.__new__(d.Herdr)
+        paused = False
+        calls = []
+        terminal = {"address": "t1", "state": "live", "status": {"state": "idle", "app": "codex"}, "labels": {}}
+        def guard():
+            if paused:
+                raise d.DispatchPaused("paused")
+        def call(command, *args, **kwargs):
+            nonlocal paused
+            calls.append(command)
+            if command == "get":
+                return terminal
+            if command == "send":
+                paused = True
+                return {"started": False}
+            self.fail("pause must prevent read/keys: " + command)
+        hc.call = call
+        with patch.object(d, "file_lock", return_value=d.contextlib.nullcontext()):
+            with self.assertRaises(d.DispatchPaused):
+                hc.send("t1", "continue", guard=guard)
+        self.assertNotIn("keys", calls)
 
     def test_dropped_enter_is_recovered_for_each_agent(self):
         def codex(message):
@@ -247,6 +275,88 @@ class Tests(unittest.TestCase):
         d.sweep(self.store, self.hc, r["id"])
         self.assertEqual(self.store.job(r["id"], "one")["address"], address)
         self.assertEqual(len(self.hc.sent), 1)
+
+    def test_ui_stop_pauses_workers_and_does_not_need_controller_environment(self):
+        r = self.init([job("one")])
+        d.sweep(self.store, self.hc, r["id"])
+        del os.environ["HC_TERMINAL_ID"]
+        result = d.control(self.store, self.hc, "lead", "stop", "esc")
+        self.assertEqual(result["status"], "paused")
+        self.assertEqual(d.status_word(self.hc.get("lead")), "idle")
+        self.assertEqual(self.store.job(r["id"], "one")["status"], "paused")
+        before = len(self.hc.sent)
+        d.supervise(self.store, self.hc, r["id"])
+        self.assertEqual(len(self.hc.sent), before)
+        self.assertEqual(self.store.run(r["id"])["status"], "paused")
+
+    def test_closed_controller_pauses_instead_of_restarting(self):
+        r = self.init([job("one")])
+        d.sweep(self.store, self.hc, r["id"])
+        self.hc.get("lead")["state"] = "finished"
+        before = len(self.hc.terminals)
+        d.supervise(self.store, self.hc, r["id"])
+        self.assertEqual(self.store.run(r["id"])["status"], "paused")
+        self.assertEqual(len(self.hc.terminals), before)
+
+    def test_stop_failure_remains_pausing_and_attempts_other_workers(self):
+        r = self.init([job("one"), job("two")])
+        d.sweep(self.store, self.hc, r["id"])
+        original = self.hc.call
+        first = self.store.job(r["id"], "one")["address"]
+        def call(*args, **kwargs):
+            if args[:2] == ("interrupt", first):
+                raise d.DispatchError("offline")
+            return original(*args, **kwargs)
+        with patch.object(self.hc, "call", side_effect=call):
+            result = d.pause(self.store, self.hc, r)
+        self.assertEqual(result["status"], "pausing")
+        self.assertIn("offline", result["note"])
+        self.assertEqual(self.store.job(r["id"], "two")["status"], "paused")
+        self.assertEqual(d.supervise(self.store, self.hc, r["id"])["status"], "paused")
+
+    def test_pause_epoch_invalidates_delivery_even_after_resume(self):
+        r = self.init([job("one")])
+        d.pause(self.store, self.hc, r)
+        d.resume(self.store, self.hc, self.store.run(r["id"]))
+        with self.assertRaises(d.DispatchPaused):
+            d.require_active(self.store, r)
+
+    def test_unmanaged_terminal_keeps_stop_key(self):
+        result = d.control(self.store, self.hc, "lead", "stop", "ctrl+c")
+        self.assertFalse(result["managed"])
+        self.assertEqual(self.hc.get("lead").get("last_keys"), ["ctrl+c"])
+
+    def test_idle_controller_without_stop_is_still_supervised(self):
+        r = self.init([job("one")])
+        d.sweep(self.store, self.hc, r["id"])
+        self.hc.get("lead")["status"] = {"state": "idle"}
+        d.supervise(self.store, self.hc, r["id"])
+        self.assertEqual(len(self.hc.sent), 1)
+
+    def test_resume_restarts_watcher_and_reuses_existing_workers(self):
+        r = self.init([job("one")])
+        d.sweep(self.store, self.hc, r["id"])
+        before = self.store.run(r["id"])
+        worker = self.store.job(r["id"], "one")["address"]
+        d.control(self.store, self.hc, "lead", "stop")
+        result = d.control(self.store, self.hc, "lead", "resume")
+        self.assertEqual(result["status"], "active")
+        self.assertNotEqual(result["watcher"], before["watcher"])
+        self.assertEqual(self.hc.get(before["watcher"])["state"], "finished")
+        self.assertEqual(self.store.job(r["id"], "one")["address"], worker)
+        self.assertTrue(any(address == "lead" for address, _ in self.hc.sent))
+
+    def test_stop_during_resume_cannot_be_overwritten(self):
+        r = self.init([job("one")])
+        d.pause(self.store, self.hc, r)
+        original = d.controller_label
+        def label(*args):
+            original(*args)
+            d.request_pause(self.store, self.store.run(r["id"]), "new stop")
+        with patch.object(d, "controller_label", side_effect=label):
+            with self.assertRaises(d.DispatchPaused):
+                d.resume(self.store, self.hc, self.store.run(r["id"]))
+        self.assertEqual(self.store.run(r["id"])["status"], "pausing")
 
     def test_accept_requires_real_report_backup_and_checks(self):
         r = self.init([job("one", writes=["one.txt"], checks=[{"argv": ["python", "-c", "print('ok')"]}])])

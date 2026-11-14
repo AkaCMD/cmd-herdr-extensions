@@ -77,6 +77,8 @@ Claude 的入口为 `/herdr-personal-dispatch:dispatch`。用“暂停当前调�
 
 ![真实 Herdr 中的 Codex 主控与两路 DeepSeek 执行代理](docs/images/dispatch.png)
 
+暂停保留任务和产物；恢复会重启守望并复用仍存活的执行会话。
+
 [完整调度说明](plugins/herdr-personal-dispatch/README.md) · [命令与任务格式](plugins/herdr-personal-dispatch/skills/dispatch/references/runtime.md)
 
 ### 3. 空间权限：为新会话选择权限档位
@@ -231,6 +233,8 @@ Open a new agent session **inside Herdr**:
 $dispatch Use two DeepSeek workers: one writes the website FAQ, the other a page checker.
 Act as the Codex controller. Check the actual files and validation results before accepting.
 ```
+
+Pausing preserves tasks and artifacts. Resuming restarts supervision and reuses live worker sessions.
 
 Use `/herdr-personal-dispatch:dispatch` in Claude. Codex or Claude can control the run; Codex, Claude and DeepSeek can execute jobs in separate interactive tabs. The default concurrency is two. The controller handles dependencies, verification, acceptance, pause and resume. Requires live `hc` and the selected agent CLIs; DeepSeek additionally requires configured `dsh-tui --backend dsh`.
 

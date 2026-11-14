@@ -30,6 +30,10 @@ class DispatchError(RuntimeError):
     pass
 
 
+class DispatchPaused(DispatchError):
+    pass
+
+
 def now():
     return time.time()
 
@@ -164,6 +168,10 @@ class Store:
           sent REAL DEFAULT 0, baseline_turn INTEGER DEFAULT 0, note TEXT DEFAULT '',
           PRIMARY KEY(run_id,id));
         """)
+        self.db.execute("BEGIN IMMEDIATE")
+        if "epoch" not in {row[1] for row in self.db.execute("PRAGMA table_info(runs)")}:
+            self.db.execute("ALTER TABLE runs ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0")
+        self.db.commit()
 
     def run(self, ref):
         key = Path(ref).name if ("/" in ref or "\\" in ref) else ref
@@ -304,7 +312,7 @@ class Herdr:
         return None
 
     def start(self, r, name, token, argv, role):
-        labels = ["dispatch.run=" + r["id"], "dispatch.token=" + token, "dispatch.role=" + role]
+        labels = ["dispatch.run=" + r["id"], "dispatch.token=" + token, "dispatch.role=" + role, "dispatch.home=" + str(home())]
         if role in {"worker", "controller"}:
             # The app adopts labeled terminals even if the controller has no visible ancestor.
             space = self.app_space(r["controller"]) or "pdspace-" + r["id"]
@@ -318,9 +326,11 @@ class Herdr:
             raise DispatchError("hc launch 缺少 address")
         return result
 
-    def send(self, address, text, *, agent=None, labels=None):
+    def send(self, address, text, *, agent=None, labels=None, guard=None):
         if not text.strip():
             raise DispatchError("消息为空")
+        if guard:
+            guard()
         target = self.get(address)
         address = target["address"]
         lock_id = hashlib.sha256(f"{Path.home()}:{address}:{target.get('created_ms')}".encode()).hexdigest()
@@ -332,7 +342,11 @@ class Herdr:
             if not agent:
                 raise DispatchError("目标终端没有报告 Codex、Claude 或 DeepSeek 状态")
             message = f"[dispatch:{uuid.uuid4().hex[:8]}] {text}"
+            if guard:
+                guard()
             receipt = self.call("send", address, message, "--json", timeout=75)
+            if guard:
+                guard()
 
             # An already working agent can return started=true with the text still in its composer.
             time.sleep(0.3)
@@ -340,6 +354,8 @@ class Herdr:
             if message_in_composer(screen, agent, message):
                 current = self.get(address)
                 require_message_target(current, target, labels)
+                if guard:
+                    guard()
                 self.call("keys", address, current.get("submit") or "enter", "--json")
                 time.sleep(0.3)
                 screen = self.call("read", address, "--lines", "0", "--json")["text"]
@@ -425,17 +441,24 @@ def require_controller(hc, r=None):
 
 
 def controller_label(hc, controller, run_id):
-    hc.call("label", controller, "dispatch.controller=" + run_id, "--json")
+    hc.call("label", controller, "dispatch.controller=" + run_id, "dispatch.run=" + run_id, "dispatch.home=" + str(home()), "--json")
 
 
 def controller_available(store, current, except_run=None):
-    row = store.db.execute("SELECT id FROM runs WHERE controller=? AND status IN ('active','paused') AND id != ?", (current, except_run or "")).fetchone()
+    row = store.db.execute("SELECT id FROM runs WHERE controller=? AND status IN ('active','pausing','paused') AND id != ?", (current, except_run or "")).fetchone()
     if row:
         raise DispatchError("当前主控已有任务 " + row[0] + "；在另一个 Herdr 主控处理新 run")
 
 
-def run_lock(run_id):
-    return file_lock(run_dir(run_id) / "sweep.lock", "该 run 正在由另一个监督操作处理，稍后重试")
+def run_lock(run_id, *, wait=0):
+    return file_lock(run_dir(run_id) / "sweep.lock", "该 run 正在由另一个监督操作处理，稍后重试", wait=wait)
+
+
+def require_active(store, r):
+    current = store.run(r["id"])
+    if current["status"] != "active" or current["epoch"] != r["epoch"]:
+        raise DispatchPaused("调度已暂停或运行版本已改变；只有用户明确恢复后才能继续")
+    return current
 
 
 @contextlib.contextmanager
@@ -482,7 +505,7 @@ def init_run(store, hc, root, plan, agent, lanes):
     current = hc.get(controller).get("labels", {}).get("dispatch.controller")
     if current:
         existing = store.db.execute("SELECT status FROM runs WHERE id=?", (current,)).fetchone()
-        if existing and existing[0] in {"active", "paused"}:
+        if existing and existing[0] in {"active", "pausing", "paused"}:
             raise DispatchError("当前主控已有任务 " + current + "；先继续它，或在另一 Herdr 终端新建")
     for kind in {j["agent"] for j in plan["jobs"]}:
         deepseek_tui_argv() if kind == "deepseek" else executable(kind)
@@ -532,7 +555,7 @@ def brief(r, j):
     atomic(task / "manifest.json", {"run": {"id": r["id"], "root": r["root"]}, "job_id": j["id"], "spec": spec})
     content = "# Herdr 任务\n\n" + json.dumps({"objective": r["objective"], **spec}, ensure_ascii=False, indent=2)
     content += f"\n\n工作目录必须是 {r['root']}。任务数据目录 {task}。先读取 {SKILL / 'references/personal.md'}，以及目标目录适用的 AGENTS.md/CLAUDE.md。主控为 {r['controller']}。\n"
-    content += "只修改 writes 范围内的文件；reads 只读。保留用户已有改动。先逐个确定文件并用下面的 backup 保存原字节，再修改；新增文件也登记。专业技能的原生验证条件继续适用。不会进行 Git/版本控制提交、push、提审、部署、发送消息或再派代理。主控负责这些动作。\n"
+    content += "只修改 writes 范围内的文件；reads 只读。保留用户已有改动。先逐个确定文件并用下面的 backup 保存原字节，再修改；新增文件也登记。专业技能的原生验证条件继续适用。不会进行 Git/VCS submit、push、提审、部署、发送消息或再派代理。主控负责这些动作。\n"
     backup_argv = [sys.executable, str(SCRIPT), 'backup', '--data-home', str(home()), '--run', r['id'], '--job', j['id'], '--file', '要修改的相对文件']
     command = "& " + " ".join("'" + a.replace("'", "''") + "'" for a in backup_argv) if os.name == "nt" else shlex.join(backup_argv)
     content += "备份命令（替换最后的相对文件，路径保持原样）:\n```" + ("powershell" if os.name == "nt" else "sh") + "\n" + command + "\n```\n"
@@ -563,7 +586,7 @@ def agent_argv(agent, task, prompt, root=None):
     return program_argv(agent) + ["--permission-mode", "auto", "--add-dir", str(task), "--", prompt]
 
 
-def settle_trust(hc, r, j, terminal):
+def settle_trust(hc, r, j, terminal, guard=None):
     """Acknowledge only Claude's first trust prompt for the authorized exact cwd."""
     if json.loads(j["spec"])["agent"] != "claude" or now() - j["sent"] > 180 or terminal["state"] != "live":
         return False
@@ -572,15 +595,19 @@ def settle_trust(hc, r, j, terminal):
     view = subprocess.run([hc.exe, "read", j["address"], "--lines", "0"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15).stdout
     if ("Quick safety check: Is this a project you created or one you trust?" in view
         and r["root"] in view and "Yes, I trust this folder" in view and "> No, exit" in view):
+        if guard:
+            guard()
         hc.call("keys", j["address"], "down", "enter", "--json")
         return True
     return False
 
 
 def launch_job(store, hc, r, j):
+    require_active(store, r)
     prompt = brief(r, j)
     try:
         name = "pd-" + r["id"][-6:] + "-" + j["id"][:15] + "-" + j["token"][:4]
+        require_active(store, r)
         t = hc.start(r, name, j["token"], agent_argv(json.loads(j["spec"])["agent"], job_dir(r["id"], j["id"]), prompt, r["root"]), "worker")
         store.update("jobs", {"run_id": r["id"], "id": j["id"]}, address=t["address"], status="running", baseline_turn=t.get("turn", 0), sent=now(), note="")
         if hasattr(hc, "exe"):
@@ -613,9 +640,11 @@ def report_for(r, j):
     return result
 
 
-def send_to_worker(hc, r, j, text):
+def send_to_worker(store, hc, r, j, text):
+    require_active(store, r)
     return hc.send(j["address"], text, agent=json.loads(j["spec"])["agent"],
-                   labels={"dispatch.run": r["id"], "dispatch.token": j["token"]})
+                   labels={"dispatch.run": r["id"], "dispatch.token": j["token"]},
+                   guard=lambda: require_active(store, r))
 
 
 def reconcile_job(store, hc, r, j):
@@ -642,7 +671,7 @@ def reconcile_job(store, hc, r, j):
         t = hc.owned(j["address"], r["id"], j["token"])
         if hasattr(hc, "exe"):
             name_app_tab(hc, r, j)
-        if hasattr(hc, "exe") and settle_trust(hc, r, j, t):
+        if hasattr(hc, "exe") and settle_trust(hc, r, j, t, guard=lambda: require_active(store, r)):
             return
         word = status_word(t)
         result = report_for(r, j)
@@ -657,13 +686,16 @@ def reconcile_job(store, hc, r, j):
             if j["nudges"] >= 3:
                 store.update("jobs", {"run_id": r["id"], "id": j["id"]}, status="blocked", note="三次续跑后仍无有效报告；主控诊断")
             else:
-                send_to_worker(hc, r, j, "继续读取 TASK.md 和 progress.md 完成剩余项；完成或受阻时写匹配当前 attempt 的 result.json。")
+                send_to_worker(store, hc, r, j, "继续读取 TASK.md 和 progress.md 完成剩余项；完成或受阻时写匹配当前 attempt 的 result.json。")
                 store.update("jobs", {"run_id": r["id"], "id": j["id"]}, nudges=j["nudges"] + 1, sent=now(), baseline_turn=t.get("turn", 0))
+    except DispatchPaused:
+        raise
     except (DispatchError, subprocess.TimeoutExpired) as e:
         store.update("jobs", {"run_id": r["id"], "id": j["id"]}, status="blocked", note=str(e)[:1500])
 
 
 def ensure_watcher(store, hc, r):
+    require_active(store, r)
     if r["watcher"]:
         try:
             if hc.owned(r["watcher"], r["id"], r["watcher_token"])["state"] == "live":
@@ -684,12 +716,16 @@ def sweep(store, hc, ref):
         if r["status"] != "active":
             return store.snapshot(r["id"])
         for j in store.jobs(r["id"]):
+            require_active(store, r)
             reconcile_job(store, hc, r, j)
         for j in store.jobs(r["id"]):
+            require_active(store, r)
             if j["status"] == "pending" and reserve(store, r, j):
                 launch_job(store, hc, r, store.job(r["id"], j["id"]))
         if all(j["status"] == "complete" for j in store.jobs(r["id"])):
-            store.update("runs", {"id": r["id"]}, status="complete", note="全部任务已由主控验收")
+            store.db.execute("UPDATE runs SET status='complete', note=? WHERE id=? AND status='active' AND epoch=?",
+                             ("全部任务已由主控验收", r["id"], r["epoch"]))
+            store.db.commit()
         else:
             ensure_watcher(store, hc, store.run(r["id"]))
         return store.snapshot(r["id"])
@@ -743,6 +779,7 @@ def _start_checks_locked(store, hc, r, job_id):
     info = {"address": None, "token": token, "attempt": j["attempt"], "status": "starting", "started": now()}
     atomic(running, info)
     name = "pd-" + r["id"][-6:] + "-c-" + job_id[:10] + "-" + token[:4]
+    require_active(store, r)
     t = hc.start(r, name, token, [sys.executable, str(SCRIPT), "run-checks", "--data-home", str(home()), "--run", r["id"], "--job", job_id, "--attempt", str(j["attempt"])], "check")
     info.update(address=t["address"], status="running")
     atomic(running, info)
@@ -762,6 +799,7 @@ def run_checks(store, r, job_id, attempt):
     before = file_hashes()
     task = job_dir(r["id"], job_id)
     for n, c in enumerate(json.loads(j["spec"])["checks"]):
+        require_active(store, r)
         argv = c["argv"][:]
         if argv[0] in {"python", "python3"}:
             argv[0] = sys.executable
@@ -847,7 +885,9 @@ def feedback(store, hc, r, job_id, text_file):
         prompt = brief(r, j) + f" 先读取 feedback-{attempt}.md，按主控反馈继续。"
         if t and t["state"] == "live":
             try:
-                send_to_worker(hc, r, j, prompt)
+                send_to_worker(store, hc, r, j, prompt)
+            except DispatchPaused:
+                raise
             except Exception as e:
                 store.update("jobs", {"run_id": r["id"], "id": job_id}, status="blocked", note=str(e)[:1500])
                 raise
@@ -857,26 +897,133 @@ def feedback(store, hc, r, job_id, text_file):
         return store.snapshot(r["id"])
 
 
+def request_pause(store, r, reason):
+    # Commit before waiting for any sender/sweep lock. This invalidates in-flight guards.
+    store.db.execute("UPDATE runs SET status='pausing', epoch=epoch+1, note=? WHERE id=? AND status!='complete'",
+                     (reason, r["id"]))
+    store.db.commit()
+    return store.run(r["id"])
+
+
+def finish_pause(store, hc, ref, *, stop_controller=True, controller_key=None):
+    with run_lock(ref, wait=80):
+        r = store.run(ref)
+        if r["status"] != "pausing":
+            return store.snapshot(ref)
+        errors = []
+
+        def stop(address, terminal, *, check=False):
+            if terminal["state"] != "live":
+                return
+            if check or status_word(terminal) == "working":
+                result = hc.call("interrupt", address, "--json", timeout=15)
+                if result.get("outcome") not in {"stopped", "exited"}:
+                    raise DispatchError("未确认终端已停止: " + address)
+
+        for j in store.jobs(ref):
+            if j["status"] in LOCKED:
+                try:
+                    t = hc.owned(j["address"], ref, j["token"]) if j["address"] else hc.find_owned(ref, j["token"])
+                    if not t and j["status"] in {"starting", "running"}:
+                        raise DispatchError("启动终端尚未确认: " + j["id"])
+                    if t:
+                        stop(t["address"], t, check=True)
+                    if j["status"] in {"starting", "running"}:
+                        store.update("jobs", {"run_id": ref, "id": j["id"]}, status="paused")
+                except (DispatchError, OSError, subprocess.TimeoutExpired) as e:
+                    errors.append(j["id"] + ": " + str(e))
+            check_file = job_dir(ref, j["id"]) / "check-terminal.json"
+            if check_file.exists():
+                try:
+                    info = load(check_file)
+                    t = hc.owned(info["address"], ref, info["token"]) if info.get("address") else hc.find_owned(ref, info["token"])
+                    if not t:
+                        raise DispatchError("检查终端尚未确认")
+                    stop(t["address"], t, check=True)
+                except (DispatchError, OSError, ValueError, subprocess.TimeoutExpired) as e:
+                    errors.append(j["id"] + " check: " + str(e))
+        try:
+            retire_watcher(hc, r)
+        except (DispatchError, subprocess.TimeoutExpired) as e:
+            errors.append("watcher: " + str(e))
+        if stop_controller:
+            try:
+                t = hc.get(r["controller"])
+                if t.get("labels", {}).get("dispatch.controller") == ref:
+                    stop(r["controller"], t)
+                    if controller_key and hc.get(r["controller"])["state"] == "live":
+                        hc.call("keys", r["controller"], controller_key, "--json")
+                else:
+                    errors.append("主控身份变更，未向该终端发送按键")
+            except (DispatchError, OSError, subprocess.TimeoutExpired) as e:
+                errors.append("controller: " + str(e))
+        store.update("runs", {"id": ref}, status="pausing" if errors else "paused",
+                     note="暂停中，未确认停止：" + "; ".join(errors)[:1500] if errors else "已暂停，保留任务、产物和锁；等待显式恢复")
+        return store.snapshot(ref)
+
+
 def pause(store, hc, r):
     require_controller(hc, r)
-    with run_lock(r["id"]):
-        r = store.run(r["id"])
-        require_controller(hc, r)
-        store.update("runs", {"id": r["id"]}, status="paused", note="用户暂停，保留任务和锁")
-        for j in store.jobs(r["id"]):
-            if j["address"] and j["status"] in LOCKED:
-                t = hc.owned(j["address"], r["id"], j["token"])
-                if t["state"] == "live" and status_word(t) == "working":
-                    hc.call("interrupt", j["address"], "--json")
-                if j["status"] in {"starting", "running"}:
-                    store.update("jobs", {"run_id": r["id"], "id": j["id"]}, status="paused")
-            check_file = job_dir(r["id"], j["id"]) / "check-terminal.json"
-            if check_file.exists():
-                info = load(check_file)
-                t = hc.owned(info["address"], r["id"], info["token"]) if info.get("address") else hc.find_owned(r["id"], info["token"])
-                if t and t["state"] == "live":
-                    hc.call("interrupt", info["address"], "--json")
-        return store.snapshot(r["id"])
+    request_pause(store, r, "用户暂停")
+    # The calling controller is executing this command; do not interrupt its own tool.
+    return finish_pause(store, hc, r["id"], stop_controller=False)
+
+
+def control(store, hc, terminal, action, key="esc"):
+    target = hc.get(terminal)
+    run_id = target.get("labels", {}).get("dispatch.controller")
+    row = store.db.execute("SELECT id FROM runs WHERE id=? AND controller=?", (run_id, terminal)).fetchone()
+    if not row:
+        if run_id:
+            raise DispatchError("管理者标签与调度数据不匹配；请指定正确的 --data-home 后重试暂停")
+        if action == "stop":
+            hc.call("keys", terminal, key, "--json")
+        return {"managed": False}
+    r = store.run(row[0])
+    if action == "status":
+        return {"managed": True, "run": r["id"], "status": r["status"], "note": r["note"]}
+    if action == "resume":
+        if r["status"] == "pausing":
+            raise DispatchError("尚有终端未确认停止，请先重试暂停")
+        with controller_environment(terminal):
+            resume(store, hc, r)
+            result = sweep(store, hc, r["id"])
+            supervise(store, hc, r["id"])
+            return result
+    request_pause(store, r, "用户通过 Herdr 停止管理者")
+    # Forward the captured human key promptly. Confirm again after senders drain.
+    key_sent = False
+    if target["state"] == "live":
+        try:
+            hc.call("keys", terminal, key, "--json", timeout=15)
+            key_sent = True
+        except (DispatchError, subprocess.TimeoutExpired):
+            pass
+    return finish_pause(store, hc, r["id"], controller_key=None if key_sent else key)
+
+
+@contextlib.contextmanager
+def controller_environment(terminal):
+    previous = os.environ.get("HC_TERMINAL_ID")
+    os.environ["HC_TERMINAL_ID"] = terminal
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("HC_TERMINAL_ID", None)
+        else:
+            os.environ["HC_TERMINAL_ID"] = previous
+
+
+def retire_watcher(hc, r):
+    if not r["watcher"] or r["watcher"] == os.environ.get("HC_TERMINAL_ID"):
+        return
+    try:
+        t = hc.owned(r["watcher"], r["id"], r["watcher_token"])
+    except DispatchError:
+        t = hc.find_owned(r["id"], r["watcher_token"])
+    if t and t["state"] == "live":
+        hc.call("kill", t["address"], "--json", timeout=15)
 
 
 def resume(store, hc, r):
@@ -884,6 +1031,8 @@ def resume(store, hc, r):
     with run_lock(r["id"]):
         r = store.run(r["id"])
         controller_available(store, current, r["id"])
+        if r["status"] == "pausing":
+            raise DispatchError("暂停尚未完成；先重试暂停，确认活动终端已停止")
         if r["status"] == "complete":
             return store.snapshot(r["id"])
         if current != r["controller"]:
@@ -894,18 +1043,52 @@ def resume(store, hc, r):
             except DispatchError as e:
                 if "旧主控仍在线" in str(e):
                     raise
+        retire_watcher(hc, r)
         controller_label(hc, current, r["id"])
-        store.update("runs", {"id": r["id"]}, controller=current, status="active", note="")
+        changed = store.db.execute("UPDATE runs SET controller=?, status='active', epoch=epoch+1, watcher=NULL, watcher_token=NULL, note='' WHERE id=? AND status=? AND epoch=?",
+                                   (current, r["id"], r["status"], r["epoch"]))
+        store.db.commit()
+        if changed.rowcount != 1:
+            raise DispatchPaused("恢复过程中收到新的暂停请求；保持暂停")
         for j in store.jobs(r["id"]):
             if j["status"] == "paused":
                 store.update("jobs", {"run_id": r["id"], "id": j["id"]}, status="running", sent=0)
+        ensure_watcher(store, hc, store.run(r["id"]))
         return store.snapshot(r["id"])
+
+
+def supervise(store, hc, ref, *, notify=True, reports=()):
+    r = store.run(ref)
+    if r["status"] == "pausing":
+        return finish_pause(store, hc, ref)
+    if r["status"] != "active":
+        return r
+    t = hc.get(r["controller"])
+    if t["state"] != "live":
+        request_pause(store, r, "管理者已退出；等待用户显式恢复")
+        return finish_pause(store, hc, ref)
+    if t.get("labels", {}).get("dispatch.controller") != ref:
+        request_pause(store, r, "主控身份已变更，停止自动输入")
+        return finish_pause(store, hc, ref, stop_controller=False)
+    if not notify or status_word(t) in {"blocked", "error", "working"}:
+        return r
+    with run_lock(ref):
+        require_active(store, r)
+        jobs = store.jobs(ref)
+        phases = {j["id"]: j["status"] for j in jobs}
+        actionable = any(j["status"] in {"starting", "running", "review"} or
+                         (j["status"] == "pending" and all(phases[d] == "complete" for d in json.loads(j["spec"])["depends_on"])) for j in jobs)
+        if reports or actionable:
+            report_note = "已收到任务报告：" + "、".join(job for job, _ in sorted(reports)) + "。" if reports else ""
+            notice = f"[个人调度监督] run={ref} epoch={r['epoch']}。{report_note}读取 $dispatch / /herdr-personal-dispatch:dispatch，先检查 status；仅当 run 为 active 且 epoch 仍匹配时执行 sweep --data-home {home()} --run {ref}，核对实际结果并自主继续。暂停后本消息失效。"
+            hc.send(r["controller"], notice, agent=r["agent"], labels={"dispatch.controller": ref},
+                    guard=lambda: require_active(store, r))
+    return store.run(ref)
 
 
 def watch(ref, interval=120):
     store, hc = Store(), Herdr()
-    r = store.run(ref)
-    events = subprocess.Popen([hc.exe, "events", "--json", "--label", "dispatch.run=" + r["id"]], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
+    events = subprocess.Popen([hc.exe, "events", "--json", "--label", "dispatch.run=" + ref], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
     messages = queue.Queue()
     def read_events():
         for line in events.stdout:
@@ -916,10 +1099,8 @@ def watch(ref, interval=120):
     print("\033]7501;state=working:app=dispatch\033\\", end="", flush=True)
     try:
         while True:
-            changed = False
             try:
-                messages.get(timeout=min(interval, 15))
-                changed = True
+                messages.get(timeout=1)
                 while not messages.empty():
                     messages.get_nowait()
             except queue.Empty:
@@ -930,61 +1111,33 @@ def watch(ref, interval=120):
             if r["watcher"] and r["watcher"] != os.environ.get("HC_TERMINAL_ID"):
                 return
             if events.poll() is not None:
-                store.update("runs", {"id": r["id"]}, note="Herdr 事件流断开；主控 sweep 会重新启动守望")
+                store.update("runs", {"id": ref}, note="Herdr 事件流断开；主控 sweep 会重新启动守望")
                 return
-            jobs = store.jobs(r["id"])
             reports = set()
-            for j in jobs:
+            for j in store.jobs(ref):
                 key = (j["id"], j["attempt"])
                 if key in announced or not j["address"] or j["status"] not in {"running", "blocked"}:
                     continue
                 try:
                     report = report_for(r, j)
                     if report and (j["status"] == "running" or j["note"] != report["summary"]):
-                        worker = hc.owned(j["address"], r["id"], j["token"])
+                        worker = hc.owned(j["address"], ref, j["token"])
                         if status_word(worker) != "working":
                             reports.add(key)
                 except (DispatchError, subprocess.TimeoutExpired):
-                    # sweep checks invalid reports and terminal identity.
                     continue
-            if not reports and now() - last < interval:
-                continue
+            due = bool(reports) or now() - last >= interval
             try:
-                t = hc.get(r["controller"])
-                if t["state"] == "live" and t.get("labels", {}).get("dispatch.controller") == r["id"]:
-                    if t.get("labels", {}).get("dispatch.role") == "controller" and r["agent"] == "claude":
-                        pseudo = {"spec": json.dumps({"agent": "claude"}), "address": r["controller"], "sent": t.get("created_ms", 0) / 1000}
-                        if settle_trust(hc, r, pseudo, t):
-                            last = now()
-                            continue
-                    # Human decisions remain parked; unrelated jobs may continue.
-                    phases = {j["id"]: j["status"] for j in jobs}
-                    actionable = any(j["status"] in {"starting", "running", "review"} or (j["status"] == "pending" and all(phases[d] == "complete" for d in json.loads(j["spec"])["depends_on"])) for j in jobs)
-                    if status_word(t) in {"blocked", "error"}:
-                        continue
-                    if reports or actionable or changed:
-                        # A timed-out send may have typed the message. Leave retries to the periodic reminder.
-                        announced.update(reports)
-                        report_note = "已收到任务报告：" + "、".join(job for job, _ in sorted(reports)) + "。" if reports else ""
-                        notice = f"[个人调度监督] run={r['id']}。{report_note}读取 $dispatch / /herdr-personal-dispatch:dispatch，执行 sweep --data-home {home()} --run {r['id']}，核对实际结果并自主继续。"
-                        hc.send(r["controller"], notice, agent=r["agent"], labels={"dispatch.controller": r["id"]})
-                    last = now()
-                elif t["state"] == "finished":
-                    if any(j["status"] in {"needs_user", "blocked"} for j in jobs) or r["restarts"] >= 3:
-                        store.update("runs", {"id": r["id"]}, note="主控已退出且需要用户/已达恢复上限；在 Herdr 新主控 resume")
-                        return
-                    token = uuid.uuid4().hex
-                    prompt = f"恢复个人 Herdr 调度 run={r['id']}。读取 {SKILL / 'SKILL.md'}。原主控已退出，调用脚本 resume 和 sweep 时带 --data-home {home()}。读取磁盘记录，自主完成原目标；已有产物先验收，不重复修改。"
-                    new = hc.start(r, "pd-" + r["id"][-6:] + "-lead-" + str(r["restarts"] + 1), token, agent_argv(r["agent"], home(), prompt, r["root"]), "controller")
-                    controller_label(hc, new["address"], r["id"])
-                    store.update("runs", {"id": r["id"]}, controller=new["address"], restarts=r["restarts"] + 1, note="自动恢复主控")
-                    last = now()
-                else:
-                    store.update("runs", {"id": r["id"]}, note="主控身份变更，停止自动输入；请人工 resume")
+                result = supervise(store, hc, ref, notify=due, reports=reports)
+                if result["status"] in {"paused", "complete"}:
                     return
+                if due:
+                    announced.update(reports)
+                    last = now()
+            except DispatchPaused:
+                continue
             except (DispatchError, subprocess.TimeoutExpired) as e:
-                # Permission dialogs reject send; do not force keys or spin.
-                print("监督通知暂未送达: " + str(e)[:200], flush=True)
+                print("监督操作暂未完成: " + str(e)[:200], flush=True)
                 last = now()
     finally:
         events.terminate()
@@ -992,6 +1145,7 @@ def watch(ref, interval=120):
             events.wait(timeout=5)
         except subprocess.TimeoutExpired:
             events.kill()
+        store.db.close()
         print("\033]7501;state=done:app=dispatch\033\\", end="", flush=True)
 
 
@@ -1025,10 +1179,16 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor")
     p = sub.add_parser("send", help="向 Herdr 中的 Codex、Claude 或 DeepSeek 发送消息")
+    p.add_argument("--data-home")
     p.add_argument("--to", required=True, metavar="TERMINAL")
     body = p.add_mutually_exclusive_group(required=True)
     body.add_argument("--text")
     body.add_argument("--text-file", help="让同一台机器上的代理读取消息文件")
+    p = sub.add_parser("control", help="Herdr 扩展的停止/恢复入口，不需要 AI 执行暂停")
+    p.add_argument("--data-home")
+    p.add_argument("--terminal", required=True)
+    p.add_argument("--action", choices=["stop", "resume", "status"], required=True)
+    p.add_argument("--key", choices=["esc", "ctrl+c"], default="esc")
     p = sub.add_parser("init")
     p.add_argument("--data-home")
     p.add_argument("--root", required=True)
@@ -1061,7 +1221,19 @@ def main():
             if not path.is_file() or "/" in args.to or "\\" in args.to:
                 raise DispatchError("消息文件必须是目标代理所在本机的文件")
             message = f"请读取消息文件 {json.dumps(str(path), ensure_ascii=False)} 并处理其中的消息。"
-        output = Herdr().send(args.to, message)
+        hc = Herdr()
+        target = hc.get(args.to)
+        labels = target.get("labels", {})
+        run_id = labels.get("dispatch.controller") or labels.get("dispatch.run")
+        if run_id:
+            if labels.get("dispatch.home") and not args.data_home:
+                os.environ["PERSONAL_DISPATCH_HOME"] = labels["dispatch.home"]
+            store = Store()
+            r = store.run(run_id)
+            with run_lock(run_id):
+                output = hc.send(args.to, message, guard=lambda: require_active(store, r))
+        else:
+            output = hc.send(args.to, message)
     elif args.command == "backup":
         key = Path(args.run).name
         manifest = load(job_dir(key, args.job) / "manifest.json")
@@ -1070,7 +1242,9 @@ def main():
         output = backup(None, manifest["run"], args.job, args.file, manifest["spec"])
     else:
         store = Store()
-        if args.command == "init":
+        if args.command == "control":
+            output = control(store, Herdr(), args.terminal, args.action, args.key)
+        elif args.command == "init":
             output = init_run(store, Herdr(), args.root, load(args.plan_file), args.agent, args.lanes)
         else:
             r = store.run(args.run)

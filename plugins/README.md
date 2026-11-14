@@ -1,6 +1,6 @@
 # Herdr 调度插件
 
-`herdr-personal-dispatch/` 是 Codex / Claude 插件，独立于本仓库的 Herdr UI mods 安装器。
+`herdr-personal-dispatch/` 是 Codex / Claude 插件，可独立注册到客户端；仓库安装器另提供可选的 Herdr Esc 暂停扩展。
 支持 Codex、Claude、DeepSeek 混合派发；DeepSeek 使用本机 `dsh-tui --backend dsh`，需自行配置 backend。
 
 安装：在插件目录运行 `python install.py --host codex` 或 `python install.py --host claude`。
